@@ -97,11 +97,52 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
   `optimize(...)` to score "does adding free-agent X improve my optimal lineup?"; the lineup Streamlit
   view lands in Phase 5's hosted dashboard.
 
-## Phase 4 — Waiver / stash / handcuff intelligence `[ ]` TODO
-- [ ] Handcuff free-agent detector (flag high-priority when a starter is Q/D/O and backup unrostered)
-- [ ] Reverse-standings **priority** spend advice (not FAAB)
-- [ ] Playoff-SOS stash ranker (Weeks 15–17 value)
-- **Next:** Phase 5.
+## Phase 4 — Waiver / stash / handcuff intelligence `[x]` DONE
+- [x] Handcuff / injury-replacement detector ([src/waivers/handcuffs.py](../src/waivers/handcuffs.py)):
+      for each of my **optimal-lineup skill starters** (reuses Phase 3 `optimize()`), finds the
+      next-man-up from the Sleeper player map's own `depth_chart_position`/`depth_chart_order` (already
+      Sleeper-keyed → zero ID friction; the named backup *is* an addable `player_id`). Walks past
+      rostered backups to the first **free agent** below my starter (records the `gap`); **URGENT**
+      when my starter is Q/D/O, else HIGH. K/DEF skipped.
+- [x] Reverse-standings **priority** spend advice ([src/waivers/priority.py](../src/waivers/priority.py)):
+      "startable upgrade" measured by re-solving `optimize()` with the candidate added
+      (`lineup_gain = new_total − base_total`, as PROGRESS anticipated). Verdict `spend | stream-later
+      | hold`, tempered by **priority scarcity** (selective near the top of the standings where a top
+      claim is scarce/slow to recover, aggressive near the bottom — [src/waivers/league.py](../src/waivers/league.py),
+      reads `settings.waiver_position`) and by **contention** from Sleeper trending-add velocity.
+- [x] Playoff stash ranker ([src/waivers/stash.py](../src/waivers/stash.py)) over a **self-computed
+      SOS in OUR scoring** ([src/waivers/sos.py](../src/waivers/sos.py)): season-to-date nflverse
+      actuals re-scored via the Phase 1 engine, aggregated to **points-allowed-per-position per
+      defense**, normalized to a per-position multiplier (league avg = 1.0). Playoff value = per-game
+      baseline × each W15/16/17 opponent's multiplier, summed (reports raw + SOS-adjusted + per-week
+      breakdown). Plus bye-week stash suggestions for my starters.
+- [x] Usage enrichment ([src/waivers/usage.py](../src/waivers/usage.py)): recent snap share (+trend),
+      target/rush share, and expected fantasy points (generic-model, labelled) from
+      `load_snap_counts` / `load_ff_opportunity`, joined to Sleeper via the `pfr_id` / `gsis_id`
+      crosswalk (new generic `ids.build_id_to_sleeper`). Best-effort — never fatal. (Red-zone usage
+      deferred: no cheap field in ff_opportunity, pbp out of scope for v1.)
+- [x] New nflverse loaders ([src/data/nflverse.py](../src/data/nflverse.py)): `load_snap_counts`,
+      `load_ff_opportunity`, `load_depth_charts` (depth charts kept as a *secondary* cross-check —
+      Sleeper's per-player depth fields are primary).
+- [x] Live glue ([src/waivers/inputs.py](../src/waivers/inputs.py)) + runnable
+      ([scripts/waiver_report.py](../scripts/waiver_report.py)):
+      `python scripts/waiver_report.py --week N [--season Y]` — handcuff alerts, spend advice (with my
+      standings rank + waiver position + posture), playoff stash ranker, bye-week stashes. Read-only.
+      Built to run **Tuesday evening CEST** before waivers clear Wed 09:00 CEST.
+- [x] Tests: `tests/test_waivers.py` (16 offline unit tests — FA split incl. reserve/taxi, standings +
+      scarcity posture, handcuff next-man-up/URGENT/gap-walk/K-DEF-skip, spend verdicts via the **real**
+      optimizer, SOS math + team normalization, stash SOS-tilt/bye-skip/sort, bye suggestions, usage
+      joins). Full suite **54 passed**.
+- [x] **Validated end-to-end against the 2025 league** (Weeks 10 & 15): FA split clean (15 rostered,
+      ~12k FAs, no overlap; all handcuff backups genuinely unrostered); handcuffs resolve real backups
+      (Achane→Wright URGENT on Q, CMC→Jordan James insurance); SOS league-avg = 1.000/pos with sane
+      spread (≈0.6–1.9) and W15–17 opponents correct; PA-by-position re-scored in our settings (DAL
+      soft to WR 34.3/gm, PHI tough on QB 16.3 with our 4-pt pass-TD).
+- **Note:** as in Phase 3, a *completed* season's weekly projections return ADP-only (zero-stat) rows
+  for many rostered non-stars, so historical FA `Δlineup` gains look inflated (QB/K/DEF especially).
+  That's the known historical-data quirk, not a logic bug — live in-season runs return full stat lines.
+  The waiver report prints UTF-8 explicitly (Windows console is cp1252).
+- **Next:** Phase 5 (hosted Streamlit dashboard + GitHub Actions weekly refresh + team-analysis views).
 
 ## Phase 5 — Hosted season dashboard + weekly refresh `[ ]` TODO
 - [ ] Streamlit Community Cloud dashboard + team-analysis views

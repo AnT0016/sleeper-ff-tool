@@ -66,3 +66,44 @@ def load_injuries(seasons: int | list[int]) -> pl.DataFrame:
     """
     _configure_cache()
     return nfl.load_injuries(seasons=seasons)
+
+
+def load_snap_counts(seasons: int | list[int]) -> pl.DataFrame:
+    """Weekly snap counts (Pro Football Reference, since 2012).
+
+    Carries ``season``, ``week``, ``team``, ``player`` (name), ``position`` and the usage columns
+    ``offense_snaps`` / ``offense_pct`` (and ST/defense equivalents). Used as a waiver *usage* signal:
+    a rising ``offense_pct`` over recent weeks marks a player earning a real role. Keyed by player
+    name + ``pfr_player_id`` (no gsis_id), so we join to Sleeper by name within a team as a soft
+    signal only -- never for scoring.
+    """
+    _configure_cache()
+    return nfl.load_snap_counts(seasons=seasons)
+
+
+def load_ff_opportunity(
+    seasons: int | list[int], *, stat_type: str = "weekly"
+) -> pl.DataFrame:
+    """Weekly fantasy-football opportunity / expected-points data (ffverse/ffopportunity).
+
+    Keyed by ``player_id`` (gsis_id) + ``posteam`` + ``week``. Carries volume (``rec_attempt``,
+    ``rush_attempt``, ``pass_attempt``), team totals (``*_team`` suffix, for share computation) and
+    model expected production. A waiver *opportunity* signal: target share = ``rec_attempt`` /
+    ``rec_attempt_team``. Not used for scoring (expected points here are in a generic model, not our
+    league settings).
+    """
+    _configure_cache()
+    return nfl.load_ff_opportunity(seasons=seasons, stat_type=stat_type)
+
+
+def load_depth_charts(seasons: int | list[int]) -> pl.DataFrame:
+    """NFL depth charts (since 2001), as time-stamped snapshots.
+
+    Carries a ``dt`` snapshot timestamp, ``team``, ``gsis_id``, ``pos_abb`` (position) and
+    ``pos_rank`` (1 = starter). Multiple snapshots per season -- take the latest at/<= the target
+    week for an as-of view. This is a *secondary* cross-check: the Sleeper player map's per-player
+    ``depth_chart_position`` / ``depth_chart_order`` is primary for handcuff detection (already
+    Sleeper-keyed, no ID join).
+    """
+    _configure_cache()
+    return nfl.load_depth_charts(seasons=seasons)

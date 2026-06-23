@@ -81,7 +81,16 @@ def nflverse_to_sleeper_stats(row: Mapping[str, Any]) -> dict[str, float]:
     return stats
 
 
+def build_id_to_sleeper(crosswalk: pl.DataFrame, source_col: str) -> dict[str, str]:
+    """Map an arbitrary crosswalk id column -> Sleeper ``sleeper_id`` from the ff_playerids crosswalk.
+
+    ``source_col`` is any id column the crosswalk carries (e.g. ``"gsis_id"`` for nflverse weekly
+    stats / opportunity, ``"pfr_id"`` for snap counts). Rows missing either side are dropped.
+    """
+    sub = crosswalk.select(source_col, "sleeper_id").drop_nulls()
+    return {row[source_col]: str(row["sleeper_id"]) for row in sub.iter_rows(named=True)}
+
+
 def build_gsis_to_sleeper(crosswalk: pl.DataFrame) -> dict[str, str]:
     """Map nflverse ``gsis_id`` -> Sleeper ``sleeper_id`` from the ff_playerids crosswalk."""
-    sub = crosswalk.select("gsis_id", "sleeper_id").drop_nulls()
-    return {row["gsis_id"]: str(row["sleeper_id"]) for row in sub.iter_rows(named=True)}
+    return build_id_to_sleeper(crosswalk, "gsis_id")
