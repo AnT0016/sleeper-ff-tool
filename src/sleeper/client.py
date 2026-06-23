@@ -85,6 +85,26 @@ def get_trending(kind: str, lookback_hours: int = 24, limit: int = 25) -> list[d
     )
 
 
+# ------------------------------------------------------------------------- draft (live polling)
+# The HTTP layer (``http.URL_TTLS``) sets ``api.sleeper.app/v1/draft/*`` to DO_NOT_CACHE, so these
+# always hit the network -- the live draft tracker polls picks every ~3s.
+def get_league_drafts(league_id: str) -> list[dict]:
+    """All drafts for a league (most leagues have one). Use to discover the ``draft_id``."""
+    return _get(f"{V1}/league/{league_id}/drafts")
+
+
+def get_draft(draft_id: str) -> dict:
+    """Draft object: ``settings`` (teams/rounds/slots_*), ``draft_order`` (user_id -> slot, empty
+    until the slot is revealed), ``slot_to_roster_id``, and the parent ``league_id``."""
+    return _get(f"{V1}/draft/{draft_id}")
+
+
+def get_draft_picks(draft_id: str) -> list[dict]:
+    """Every pick made so far: ``pick_no``, ``round``, ``draft_slot``, ``roster_id``, ``player_id``
+    (team abbreviation for DEF), ``picked_by`` (user_id), and a ``metadata`` dict (name/pos/team)."""
+    return _get(f"{V1}/draft/{draft_id}/picks")
+
+
 # ----------------------------------------------------------------- data host (projections/stats)
 def get_projections(
     year: int,

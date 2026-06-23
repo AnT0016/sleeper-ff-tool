@@ -32,11 +32,32 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
   API — **5 bench + 1 IR** (IR lives in `settings.reserve_slots`), CLAUDE.md corrected from 6 to 5 bench.
 - **Next:** Phase 2 (local live draft tracker).
 
-## Phase 2 — Local live draft tracker `[ ]` TODO
-- [ ] Best-available by custom VOR, tiers, positional-run detection, roster needs
-- [ ] Slot-agnostic until `draft_order` populates, then simulate snake pick numbers
-- [ ] Local Streamlit app polling `/draft/<id>/picks` ~3s
-- **Next:** Phase 3.
+## Phase 2 — Local live draft tracker `[x]` DONE
+- [x] Local Streamlit app ([apps/draft_app.py](../apps/draft_app.py)), run with
+      `streamlit run apps/draft_app.py`. Polls `/draft/<id>/picks` every ~3s via
+      `st.fragment(run_every=...)`; diffs against the last poll for a live "new picks" feed.
+- [x] 3 read-only draft endpoints added behind the one client
+      ([src/sleeper/client.py](../src/sleeper/client.py)): `get_league_drafts`, `get_draft`,
+      `get_draft_picks` (HTTP layer already sets `…/draft/*` to DO_NOT_CACHE).
+- [x] Custom-scored board ([src/projections/board.py](../src/projections/board.py)): every season
+      projection re-scored in OUR live `scoring_settings` (reuses the Phase 1 engine); ADP
+      (`adp_half_ppr`) carried as a market signal only, never for ranking.
+- [x] VOR + tiers ([src/draft/vor.py](../src/draft/vor.py)): replacement = first non-starter at
+      each position, with **data-driven FLEX allocation** (best leftover RB/WR/TE fill the flex);
+      per-position gap-based tiers. Board ranks **by VOR** (cross-position).
+- [x] Snake math + survival ([src/draft/snake.py](../src/draft/snake.py)): slot-agnostic (tiers+VOR)
+      until `draft_order` populates, then our pick numbers `(r-1)*12+S` / `r*12-S+1` and per-pick
+      🟢/🟡/🔴 "likely to survive" flags vs market ADP.
+- [x] Roster needs + runs ([src/draft/roster.py](../src/draft/roster.py)): fills dedicated slots
+      then FLEX from our picks (via `picked_by`); 🎯 highlights open needs; rolling positional-run
+      counts.
+- [x] Tests: `tests/test_draft.py` (23 offline unit tests — snake, VOR/flex, tiers, roster, runs).
+- [x] **Validated end-to-end against the 2025 completed draft** (`draft_id …069`): reconstructed
+      snake picks `[7,18,…,162]` match my actual pick numbers exactly; all 168 drafted players
+      (incl. DEF-by-team) join the board; K first surfaces at VOR rank #53 and DEF at #69 (the
+      "don't draft K/DEF early" rule falls out of VOR). Streamlit script verified headless via
+      `AppTest` for both complete- and mid-draft states.
+- **Next:** Phase 3 (weekly lineup optimizer, PuLP).
 
 ## Phase 3 — Weekly lineup optimizer (PuLP) `[ ]` TODO
 - [ ] Slot constraints: 1 QB, 2 RB, 2 WR, 1 TE, 1 FLEX{RB/WR/TE}, 1 K, 1 DEF
