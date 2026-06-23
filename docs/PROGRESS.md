@@ -59,10 +59,43 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
       `AppTest` for both complete- and mid-draft states.
 - **Next:** Phase 3 (weekly lineup optimizer, PuLP).
 
-## Phase 3 — Weekly lineup optimizer (PuLP) `[ ]` TODO
-- [ ] Slot constraints: 1 QB, 2 RB, 2 WR, 1 TE, 1 FLEX{RB/WR/TE}, 1 K, 1 DEF
-- [ ] Exclude bye-week and OUT/IR players; optimize over custom-scored weekly projections
-- **Next:** Phase 4.
+## Phase 3 — Weekly lineup optimizer (PuLP) `[x]` DONE
+- [x] Integer LP core ([src/optimizer/lineup.py](../src/optimizer/lineup.py)): one binary var per
+      *(eligible player × slot the position may fill)*; each player ≤ 1 slot, each slot ≤ capacity,
+      maximize custom-scored points (with a negligible fill-nudge so 0-proj K/DEF still get slotted).
+      Slots are read live from the league's `roster_positions` (`lineup_slots`) — **1 QB, 2 RB, 2 WR,
+      1 TE, 1 FLEX{RB/WR/TE}, 1 K, 1 DEF**. Position/FLEX eligibility is structural (illegal pairs get
+      no variable). Unfillable slots are returned as `holes`, never an exception.
+- [x] Start/sit + risk ([src/optimizer/startsit.py](../src/optimizer/startsit.py)): per-bench delta
+      vs. the starter they'd replace (≤ 0 in an optimal lineup); risky-start flags for
+      Questionable/Doubtful starters and **forced downgrades** (a higher-projected rostered player
+      stuck on bye/OUT/IR), plus an idle (bye/OUT/IR) list.
+- [x] Live-data glue ([src/optimizer/inputs.py](../src/optimizer/inputs.py)): joins my roster
+      (`/rosters` by `owner_id`, `reserve` = IR) → weekly projections re-scored in our live
+      `scoring_settings` (Phase 1 engine) → Sleeper `injury_status` (authoritative) → byes. Logs every
+      rostered player that fails to join a projection. OUT/IR/PUP/Sus/NA/DNR + IR-slot excluded;
+      Q/D stay startable-but-flagged.
+- [x] nflverse loaders ([src/data/nflverse.py](../src/data/nflverse.py)): `load_schedules` (byes =
+      teams with no REG game that week; nflverse `LA`→Sleeper `LAR` normalized) and `load_injuries`
+      (secondary cross-check).
+- [x] Runnable ([scripts/optimize_lineup.py](../scripts/optimize_lineup.py)):
+      `python scripts/optimize_lineup.py --week N [--season Y]` — prints the optimal lineup + total,
+      start/sit table, risky flags, and the idle list.
+- [x] Tests: `tests/test_optimizer.py` (15 offline unit tests — exact slot fill, **FLEX takes the
+      best leftover RB/WR/TE and never a higher-projected QB**, bye/OUT/IR exclusion, hole reporting,
+      0-proj fill, start/sit targeting + sign, Q/D + forced-downgrade flags, `assemble_players`/
+      `bye_teams` joins). Full suite **38 passed**.
+- [x] **Validated end-to-end against the 2025 league** (Week 5): all 14 roster players join their
+      projection rows; custom scoring matches (Jameson Williams 10.55 ≈ Sleeper `pts_half_ppr` 10.54);
+      Garrett Wilson on the IR slot is excluded and surfaces as a forced-downgrade flag; Q/D starters
+      flagged. PuLP migrated to `prob.add_variable` (no deprecation warnings); kept bundled
+      `PULP_CBC_CMD` (the non-deprecated `COIN_CMD` needs an external `cbc` binary).
+- **Note:** querying a *completed* season's weekly projections returns ADP-only (zero-stat) rows for
+  many non-stars (e.g. wk5 DJ Moore = `{adp_dd_ppr: 1000}` → 0.0). That is a historical-data quirk,
+  not a join bug; live in-season runs for an upcoming week return full stat lines.
+- **Next:** Phase 4 (waiver / stash / handcuff intelligence). The handcuff/waiver logic will reuse
+  `optimize(...)` to score "does adding free-agent X improve my optimal lineup?"; the lineup Streamlit
+  view lands in Phase 5's hosted dashboard.
 
 ## Phase 4 — Waiver / stash / handcuff intelligence `[ ]` TODO
 - [ ] Handcuff free-agent detector (flag high-priority when a starter is Q/D/O and backup unrostered)
