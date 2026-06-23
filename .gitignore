@@ -1,0 +1,33 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets (Sleeper needs none; FantasyPros key etc. go in env / Streamlit secrets)
+.env
+.streamlit/secrets.toml
+
+# data_cache/ IS committed (our computed parquet/sqlite artifacts). Only volatile,
+# re-fetchable download caches are ignored: the requests-cache HTTP store and the
+# nflreadpy raw download cache. (gitignore: trailing inline comments are NOT supported.)
+data_cache/http_cache.sqlite
+data_cache/http_cache.sqlite-*
+data_cache/nflverse_cache/
