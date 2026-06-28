@@ -9,6 +9,7 @@ ranker). The networked snapshot path (``analysis.snapshot``) is exercised manual
 
 from __future__ import annotations
 
+from analysis import backtest
 from analysis.backtest import lineup_from_points, optimal_standings, simulate_draft
 from analysis.team import (
     PositionStrength,
@@ -192,3 +193,55 @@ def test_optimal_standings_subs_my_optimal_into_head_to_head():
         ]
     }
     assert optimal_standings(matchups, my_roster_id=1, my_optimal_by_week={1: 115.0}) == [1, 2]
+
+
+# --------------------------------------------------------------------------- full-view helpers
+def test_starting_slot_labels_excludes_bench_and_ir():
+    rp = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "K", "DEF", "BN", "BN", "IR"]
+    assert backtest.starting_slot_labels(rp) == ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "K", "DEF"]
+
+
+def test_draftboard_rows_grade_flag_and_name_fallback():
+    picks = [
+        {"pick_no": 1, "round": 1, "draft_slot": 1, "roster_id": 5, "player_id": "100",
+         "metadata": {"first_name": "Alpha", "last_name": "Back", "position": "RB", "team": "PHI"}},
+        {"pick_no": 2, "round": 1, "draft_slot": 2, "roster_id": 9, "player_id": "PHI",
+         "metadata": {"position": "DEF"}},
+    ]
+    rows = backtest.draftboard_rows(
+        picks, {5: "Me", 9: "Them"}, {"100": "Alpha Back"}, {"100": "RB"}, {"100": 120.0}, my_rid=5
+    )
+    assert rows[0]["player"] == "Alpha Back" and rows[0]["is_mine"] and rows[0]["season_pts"] == 120.0
+    assert rows[1]["team"] == "Them" and rows[1]["is_mine"] is False
+    assert rows[1]["player"] == "PHI"  # not on the board, no name -> the id itself
+
+
+def test_matchup_detail_aligns_slots_and_flags_empty():
+    pm = {"1": {"full_name": "My QB"}, "2": {"full_name": "My RB"}, "3": {"full_name": "Opp QB"}}
+    rows = backtest.matchup_detail_rows(
+        3, ["QB", "RB"], ["1", "2"], ["3", "0"], {"1": 20.0, "2": 10.0}, {"3": 15.0}, {}, pm
+    )
+    assert rows[0]["slot"] == "QB" and rows[0]["my_player"] == "My QB" and rows[0]["my_pts"] == 20.0
+    assert rows[0]["opp_player"] == "Opp QB" and rows[0]["opp_pts"] == 15.0
+    assert rows[1]["opp_player"] == "(empty)"  # a "0" starter slot
+
+
+def test_transaction_rows_split_per_roster_and_drop_incomplete():
+    txns = [
+        {"type": "waiver", "status": "complete", "adds": {"50": 4}, "drops": {"60": 4},
+         "roster_ids": [4]},
+        {"type": "trade", "status": "complete", "adds": {"70": 4, "80": 7},
+         "drops": {"70": 7, "80": 4}, "roster_ids": [4, 7]},
+        {"type": "free_agent", "status": "failed", "adds": {"99": 4}, "roster_ids": [4]},
+    ]
+    pm = {"50": {"full_name": "Add1"}, "60": {"full_name": "Drop1"},
+          "70": {"full_name": "P70"}, "80": {"full_name": "P80"}}
+    rows = backtest.transaction_rows(2, txns, {4: "Me", 7: "You"}, {}, pm, my_rid=4)
+    waiver = [r for r in rows if r["type"] == "waiver"]
+    assert len(waiver) == 1 and waiver[0]["added"] == "Add1" and waiver[0]["dropped"] == "Drop1"
+    assert waiver[0]["is_mine"]
+    trade = [r for r in rows if r["type"] == "trade"]
+    assert len(trade) == 2  # one row per roster involved
+    me = next(r for r in trade if r["team"] == "Me")
+    assert me["added"] == "P70" and me["dropped"] == "P80"
+    assert not any(r["type"] == "free_agent" for r in rows)  # failed transaction filtered out

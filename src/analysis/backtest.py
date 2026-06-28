@@ -16,6 +16,11 @@ by the points players really put up. Four retrospective views (all read-only):
 * **Season summary** — actual vs. optimal vs. tool totals & records, total bench points lost, and a
   recomputed "always-optimal" standings (flips your head-to-heads the optimal lineup would have won).
 * **League-wide rank** — your actual (and optimal) weekly score ranked among all 12 teams.
+* **Full draftboard** — the real snake draft as a round×slot grid (all 12 teams), each pick graded by
+  full-season points.
+* **Weekly head-to-head** — my whole starting lineup vs. my opponent's, slot-by-slot, by real points.
+* **Transactions** — the season's completed adds / drops / trades (weekly lineups above already
+  reflect these — this view just surfaces the moves).
 
 The pure helpers (:func:`simulate_draft`, :func:`lineup_from_points`, :func:`optimal_standings`) are
 unit-tested offline; :func:`build_backtest` is the networked orchestrator the CLI runs.
@@ -206,6 +211,116 @@ def _top_miss(actual_ids, optimal_starters, pts_map, players_map) -> str:
     return f"{nm(bid)} {bpts:.1f}"
 
 
+# --------------------------------------------------------------------------- full-view helpers
+def _display_name(pid: str, name_by_id: Mapping[str, str], players_map: Mapping[str, Mapping]) -> str:
+    """Best display name for a player id (board name → master player map → the id itself)."""
+    if pid in ("0", "", "None") or pid is None:
+        return "(empty)"
+    return name_by_id.get(pid) or (players_map.get(pid) or {}).get("full_name") or pid
+
+
+def starting_slot_labels(roster_positions: Sequence[str]) -> list[str]:
+    """Ordered startable slot labels matching the Sleeper ``starters`` array (bench/IR excluded)."""
+    return [p for p in (roster_positions or []) if p not in ("BN", "IR", "TAXI")]
+
+
+def draftboard_rows(
+    picks: Sequence[Mapping],
+    names_by_rid: Mapping[int, str],
+    name_by_id: Mapping[str, str],
+    pos_by_id: Mapping[str, str],
+    season_pts: Mapping[str, float],
+    my_rid: int,
+) -> list[dict]:
+    """One row per draft pick for the full board: slot/round, team, player, pos, full-season points."""
+    rows: list[dict] = []
+    for pk in sorted(picks, key=lambda p: int(p.get("pick_no") or 0)):
+        pid = str(pk.get("player_id"))
+        meta = pk.get("metadata") or {}
+        name = (
+            name_by_id.get(pid)
+            or f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip()
+            or pid
+        )
+        rid = int(pk.get("roster_id") or 0)
+        rows.append(
+            {
+                "pick": int(pk.get("pick_no") or 0),
+                "round": int(pk.get("round") or 0),
+                "slot": int(pk.get("draft_slot") or 0),
+                "team": names_by_rid.get(rid, f"Team {rid}"),
+                "player": name,
+                "pos": pos_by_id.get(pid) or meta.get("position") or "",
+                "nfl_team": meta.get("team") or "",
+                "season_pts": round(float(season_pts.get(pid, 0.0)), 1),
+                "is_mine": rid == my_rid,
+            }
+        )
+    return rows
+
+
+def matchup_detail_rows(
+    week: int,
+    slot_labels: Sequence[str],
+    my_starters: Sequence[str],
+    opp_starters: Sequence[str],
+    my_points: Mapping[str, float],
+    opp_points: Mapping[str, float],
+    name_by_id: Mapping[str, str],
+    players_map: Mapping[str, Mapping],
+) -> list[dict]:
+    """Slot-aligned head-to-head rows: my starter vs the opponent's at each lineup slot."""
+    rows: list[dict] = []
+    for i, slot in enumerate(slot_labels):
+        my_pid = str(my_starters[i]) if i < len(my_starters) else "0"
+        opp_pid = str(opp_starters[i]) if i < len(opp_starters) else "0"
+        rows.append(
+            {
+                "week": week,
+                "slot": slot,
+                "my_player": _display_name(my_pid, name_by_id, players_map),
+                "my_pts": round(float(my_points.get(my_pid, 0.0)), 2),
+                "opp_player": _display_name(opp_pid, name_by_id, players_map),
+                "opp_pts": round(float(opp_points.get(opp_pid, 0.0)), 2),
+            }
+        )
+    return rows
+
+
+def transaction_rows(
+    week: int,
+    txns: Sequence[Mapping],
+    names_by_rid: Mapping[int, str],
+    name_by_id: Mapping[str, str],
+    players_map: Mapping[str, Mapping],
+    my_rid: int,
+) -> list[dict]:
+    """One row per (completed transaction × roster involved): what each team added and dropped."""
+    rows: list[dict] = []
+    for tx in txns or []:
+        if (tx.get("status") or "") != "complete":
+            continue
+        adds = {str(k): int(v) for k, v in (tx.get("adds") or {}).items()}
+        drops = {str(k): int(v) for k, v in (tx.get("drops") or {}).items()}
+        rids = {int(r) for r in (tx.get("roster_ids") or [])} | set(adds.values()) | set(drops.values())
+        for rid in sorted(rids):
+            added = [_display_name(p, name_by_id, players_map) for p, r in adds.items() if r == rid]
+            dropped = [_display_name(p, name_by_id, players_map) for p, r in drops.items() if r == rid]
+            if not added and not dropped:
+                continue
+            rows.append(
+                {
+                    "week": week,
+                    "type": tx.get("type") or "",
+                    "team": names_by_rid.get(rid, f"Team {rid}"),
+                    "added": ", ".join(added) or "—",
+                    "dropped": ", ".join(dropped) or "—",
+                    "is_mine": rid == my_rid,
+                }
+            )
+    return rows
+
+
 # --------------------------------------------------------------------------- networked orchestrator
 def build_backtest(
     league_id: str,
@@ -219,6 +334,7 @@ def build_backtest(
     league = sleeper.get_league(league_id)
     scoring = league["scoring_settings"]
     slots = lineup_slots(league.get("roster_positions") or [])
+    slot_labels = starting_slot_labels(league.get("roster_positions") or [])
     playoff_start = int((league.get("settings") or {}).get("playoff_week_start") or DEFAULT_PLAYOFF_START)
 
     rosters = sleeper.get_rosters(league_id)
@@ -244,6 +360,7 @@ def build_backtest(
 
     # --- weekly backtest -------------------------------------------------------------------------
     weekly_rows: list[dict] = []
+    matchup_rows: list[dict] = []
     optimal_by_week: dict[int, float] = {}
     for w, m, myrow in weeks:
         pp = {str(k): float(v) for k, v in (myrow.get("players_points") or {}).items()}
@@ -279,6 +396,16 @@ def build_backtest(
         opp = next((r for r in m if r.get("matchup_id") == mid and int(r["roster_id"]) != my_rid), None)
         opp_pts = round(float(opp.get("points") or 0.0), 2) if opp else None
         opp_name = names.get(int(opp["roster_id"]), "—") if opp else "—"
+
+        if opp is not None:
+            opp_pp = {str(k): float(v) for k, v in (opp.get("players_points") or {}).items()}
+            matchup_rows.extend(
+                matchup_detail_rows(
+                    w, slot_labels, actual_starters,
+                    [str(x) for x in (opp.get("starters") or [])],
+                    pp, opp_pp, {}, players_map,
+                )
+            )
 
         team_pts = {int(r["roster_id"]): float(r.get("points") or 0.0) for r in m}
         others = [p for rid, p in team_pts.items() if rid != my_rid]
@@ -344,6 +471,18 @@ def build_backtest(
             }
         )
 
+    # --- full draftboard (all teams) + transactions timeline -------------------------------------
+    draftboard = draftboard_rows(picks, names, name_by_id, pos_by_id, season_pts, my_rid)
+    my_draft_slot = next((r["slot"] for r in draftboard if r["is_mine"]), 0)
+
+    tx_rows: list[dict] = []
+    for w in range(1, max_week + 1):
+        try:
+            txns = sleeper.get_transactions(league_id, w)
+        except Exception:  # a week with no transactions endpoint shouldn't sink the backtest
+            txns = []
+        tx_rows.extend(transaction_rows(w, txns, names, name_by_id, players_map, my_rid))
+
     # --- season summary --------------------------------------------------------------------------
     reg = [r for r in weekly_rows if not r["playoff"]]
     opt_ranking = optimal_standings(weekly_matchups, my_rid, optimal_by_week)
@@ -371,8 +510,16 @@ def build_backtest(
         "draft_my_total": round(sum(r["my_pts"] for r in draft_rows), 1),
         "draft_tool_total": round(sum(r["tool_pts"] for r in draft_rows), 1),
         "draft_id": str(draft_id),
+        "my_draft_slot": int(my_draft_slot),
+        "n_transactions": len(tx_rows),
     }
-    tables = {"weekly": pd.DataFrame(weekly_rows), "draft": pd.DataFrame(draft_rows)}
+    tables = {
+        "weekly": pd.DataFrame(weekly_rows),
+        "draft": pd.DataFrame(draft_rows),
+        "draftboard": pd.DataFrame(draftboard),
+        "matchup_detail": pd.DataFrame(matchup_rows),
+        "transactions": pd.DataFrame(tx_rows),
+    }
     return tables, meta
 
 

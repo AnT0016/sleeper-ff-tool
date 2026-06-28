@@ -20,7 +20,7 @@ import sys
 
 from draftsim.engine import simulate
 from draftsim.inputs import load_sim_inputs
-from draftsim.report import format_report
+from draftsim.report import board_grid, format_report
 from draftsim.strategy import STRATEGIES
 from sleeper import client
 from sleeper.config import LEAGUE_ID, MY_USER_ID
@@ -44,7 +44,8 @@ def main() -> None:
         help=f"comma-separated subset of: {', '.join(STRATEGIES)}",
     )
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--pool-size", type=int, default=300, help="top-N by VOR kept draftable")
+    ap.add_argument("--pool-size", type=int, default=300, help="top-N by ADP and by VOR kept draftable")
+    ap.add_argument("--board", action="store_true", help="also print a representative simulated draftboard")
     ap.add_argument("--league", default=LEAGUE_ID)
     ap.add_argument("--user", default=MY_USER_ID)
     args = ap.parse_args()
@@ -70,6 +71,9 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print()
     print(format_report(out, inp.slot_source, season))
+    if args.board:
+        print()
+        print(board_grid(out))
     print()
 
 

@@ -15,7 +15,8 @@ import numpy as np
 from draft.roster import RosterConfig
 from draftsim import distributions as dist
 from draftsim.bots import bot_allows
-from draftsim.engine import build_pool, simulate
+from draftsim.engine import build_pool, representative_draft, simulate
+from draftsim.report import board_grid
 from draftsim.lineup import best_lineup_points, select_starters
 from draftsim.strategy import STRATEGIES, forced_positions
 from projections.board import PlayerRow
@@ -174,3 +175,20 @@ def test_common_random_numbers_make_runs_reproducible():
     a = simulate(board, CFG, my_slot=3, n_sims=100, strategies=["best_vor"], seed=42)
     b = simulate(board, CFG, my_slot=3, n_sims=100, strategies=["best_vor"], seed=42)
     assert np.array_equal(a.results["best_vor"].my_points, b.results["best_vor"].my_points)
+
+
+def test_representative_draft_reconstructs_legal_full_draft():
+    board = _synthetic_board()
+    out = simulate(board, CFG, my_slot=5, n_sims=60, strategies=["best_vor"], seed=7)
+    rosters = representative_draft(out, "best_vor")
+    assert len(rosters) == CFG.teams
+    assert all(len(r) == CFG.rounds for r in rosters)  # every team filled exactly `rounds` picks
+    picks = [i for r in rosters for i in r]
+    assert len(picks) == len(set(picks)) == CFG.teams * CFG.rounds  # no player drafted twice
+
+
+def test_board_grid_marks_my_slot():
+    board = _synthetic_board()
+    out = simulate(board, CFG, my_slot=4, n_sims=40, strategies=["best_vor"], seed=1)
+    txt = board_grid(out, "best_vor")
+    assert "S4*" in txt and "R 1" in txt and "[" in txt  # my column starred, my picks bracketed

@@ -353,7 +353,9 @@ with tab_bt:
             chart = weekly.set_index("week")[["actual", "optimal", "tool"]]
             st.line_chart(chart, height=240)
 
-        sub_week, sub_draft = st.tabs(["📅 Weekly detail", "🏈 Draft replay"])
+        sub_week, sub_h2h, sub_draft, sub_board, sub_tx = st.tabs(
+            ["📅 Weekly detail", "⚔️ Matchups", "🏈 Draft replay", "🗂️ Draft board", "🔁 Transactions"]
+        )
 
         # ----- weekly detail ---------------------------------------------------------------
         with sub_week:
@@ -400,3 +402,72 @@ with tab_bt:
                     f"**{bm.get('draft_my_total', 0):.0f}** season points "
                     f"(**{bm.get('draft_tool_total', 0) - bm.get('draft_my_total', 0):+.0f}**)."
                 )
+
+        # ----- weekly head-to-head ---------------------------------------------------------
+        with sub_h2h:
+            st.caption("Your whole starting lineup vs your real opponent's, slot-by-slot, scored by actual points.")
+            md = load_bt("matchup_detail", bmt)
+            if md.empty:
+                st.caption("—")
+            else:
+                wk_opts = sorted(int(w) for w in md["week"].unique())
+                wsel = st.selectbox("Week", wk_opts, key="bt_h2h_week")
+                wdf = md[md["week"] == wsel].copy()
+                my_tot, opp_tot = round(wdf["my_pts"].sum(), 2), round(wdf["opp_pts"].sum(), 2)
+                wrow = weekly[weekly["week"] == wsel]
+                opp_name = wrow["opponent"].iloc[0] if not wrow.empty else "opponent"
+                res = "✅ WIN" if my_tot > opp_tot else ("❌ LOSS" if my_tot < opp_tot else "➖ TIE")
+                h1, h2, h3 = st.columns(3)
+                h1.metric(bm.get("my_team_name", "Me"), f"{my_tot:.2f}")
+                h2.metric(str(opp_name), f"{opp_tot:.2f}")
+                h3.metric("Result", res, f"{my_tot - opp_tot:+.2f}", delta_color="off")
+                view = wdf.rename(columns={
+                    "my_player": bm.get("my_team_name", "me"), "my_pts": "pts",
+                    "opp_pts": "pts ", "opp_player": str(opp_name),
+                })
+                show(view[["slot", bm.get("my_team_name", "me"), "pts", "pts ", str(opp_name)]])
+
+        # ----- full draftboard (all teams) -------------------------------------------------
+        with sub_board:
+            st.caption(
+                "The real snake draft — all 12 teams, round × slot. Your column is starred; each cell "
+                "is the player and full-season fantasy points in our scoring."
+            )
+            db = load_bt("draftboard", bmt)
+            if db.empty:
+                st.caption("—")
+            else:
+                my_slot = int(bm.get("my_draft_slot", 0))
+                db = db.copy()
+                db["cell"] = db.apply(
+                    lambda r: f"{r['player']} ({r['pos']}) · {r['season_pts']:.0f}", axis=1
+                )
+                slot_team = db.drop_duplicates("slot").set_index("slot")["team"].to_dict()
+                grid = db.pivot(index="round", columns="slot", values="cell")
+                grid = grid.reindex(sorted(grid.columns), axis=1)
+                grid.columns = [
+                    ("⭐ " if s == my_slot else "") + str(slot_team.get(s, f"S{s}")) for s in grid.columns
+                ]
+                grid.index = [f"R{r}" for r in grid.index]
+                st.dataframe(grid, width="stretch", height=560)
+
+        # ----- transactions timeline -------------------------------------------------------
+        with sub_tx:
+            st.caption(
+                "Completed adds / drops / trades over the season. The weekly views above already score "
+                "each week's *actual* roster (waivers + trades included) — this just surfaces the moves."
+            )
+            tx = load_bt("transactions", bmt)
+            if tx.empty:
+                st.caption("No transactions recorded.")
+            else:
+                only_mine = st.checkbox("Only my moves", value=False, key="bt_tx_mine")
+                t = tx.copy()
+                if only_mine:
+                    t = t[t["is_mine"].astype(bool)]
+                _TX_LABEL = {"waiver": "waiver", "free_agent": "free agent", "trade": "trade"}
+                t["type"] = t["type"].map(lambda x: _TX_LABEL.get(x, x))
+                t["team"] = t.apply(
+                    lambda r: ("⭐ " if r["is_mine"] else "") + str(r["team"]), axis=1
+                )
+                show(t[["week", "type", "team", "added", "dropped"]])

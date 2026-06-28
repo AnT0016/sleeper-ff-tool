@@ -74,17 +74,16 @@ _UNDRAFTED_ADP = 1.0e9
 def build_pool(board: Sequence[PlayerRow], *, pool_size: int = 300) -> SimPool:
     """Build a :class:`SimPool` from a VOR-scored board.
 
-    Keeps every player with a real market ADP, every K/DEF, and the top ``pool_size`` by VOR — the
-    only players a 12-team draft realistically reaches. (Anyone outside is effectively undraftable.)
+    Keeps the union of the top ``pool_size`` by market ADP (everything bots realistically reach),
+    the top ``pool_size`` by VOR (my targets), and every K/DEF — a few hundred players, since a
+    12-team × 14-round draft only ever makes 168 picks. Anyone outside is effectively undraftable.
     """
-    order_by_vor = sorted(range(len(board)), key=lambda i: board[i].vor, reverse=True)
-    top_vor = set(order_by_vor[:pool_size])
-    sel = [
-        i
-        for i, r in enumerate(board)
-        if r.adp != float("inf") or r.pos in ("K", "DEF") or i in top_vor
-    ]
-    rows = [board[i] for i in sel]
+    n = len(board)
+    by_vor = sorted(range(n), key=lambda i: board[i].vor, reverse=True)
+    by_adp = sorted((i for i in range(n) if board[i].adp != float("inf")), key=lambda i: board[i].adp)
+    keep = set(by_vor[:pool_size]) | set(by_adp[:pool_size])
+    keep |= {i for i in range(n) if board[i].pos in ("K", "DEF")}
+    rows = [board[i] for i in sorted(keep)]
 
     pos = [r.pos for r in rows]
     mean = np.array([r.proj_pts for r in rows], dtype=float)
@@ -277,6 +276,23 @@ class SimOutput:
     n_sims: int
     seed: int
     results: dict[str, StrategyResult]
+    adp_order: np.ndarray  # (n_sims, n_players) per-sim noisy-ADP order, for board reconstruction
+
+
+def representative_draft(out: SimOutput, name: str) -> list[list[int]]:
+    """Reconstruct one full draft for strategy ``name`` — the sim whose season points are the median
+    (a 'typical' outcome). Deterministic given the stored per-sim noisy-ADP order, so it re-runs the
+    exact draft. Returns each team's roster (pool indices), in pick order — i.e. ``rosters[t][r-1]``
+    is team ``t``'s round-``r`` pick, which is the round×slot draftboard grid directly.
+    """
+    r = out.results[name]
+    median_sim = int(np.argsort(r.my_points, kind="stable")[len(r.my_points) // 2])
+    my_pick_index = {pno: k for k, pno in enumerate(r.my_picks)}
+    throwaway = np.zeros((len(r.my_picks), out.pool.n), dtype=float)
+    return _draft_once(
+        out.pool, out.adp_order[median_sim], out.my_slot, out.cfg,
+        STRATEGIES[name], throwaway, my_pick_index,
+    )
 
 
 def simulate(
@@ -305,5 +321,6 @@ def simulate(
         name: run_strategy(pool, sampled, adp_order, my_slot, cfg, name) for name in strategies
     }
     return SimOutput(
-        pool=pool, cfg=cfg, my_slot=my_slot, n_sims=n_sims, seed=seed, results=results
+        pool=pool, cfg=cfg, my_slot=my_slot, n_sims=n_sims, seed=seed,
+        results=results, adp_order=adp_order,
     )

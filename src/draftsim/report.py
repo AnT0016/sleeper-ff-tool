@@ -17,7 +17,7 @@ import numpy as np
 
 from .bots import ADP_NOISE, BOT_MAX_PER_POS, LATE_ROUND_FRACTION
 from .distributions import INJURY_RISK, POSITION_CV, SEASON_GAMES
-from .engine import SimOutput, StrategyResult
+from .engine import SimOutput, StrategyResult, representative_draft
 from .lineup import select_starters
 
 # Positions that are realistically streamable week-to-week, so a missing rostered backup hurts less.
@@ -47,7 +47,7 @@ def assumptions_block(out: SimOutput, slot_source: str) -> str:
         "I draft by our CUSTOM VOR.",
         f"      bot roster caps: {caps}; K/DEF only from round {late}+.",
         "  • Decisions use projections/ADP (ex-ante); evaluation uses sampled outcomes (ex-post).",
-        f"  • Pool: {out.pool.n} players (all with market ADP + all K/DEF + top VOR).",
+        f"  • Pool: {out.pool.n} draftable players (top by ADP + top by VOR + all K/DEF).",
         f"  • Slot {out.my_slot} ({slot_source}) · {out.cfg.teams} teams · {out.cfg.rounds} rounds "
         f"· {out.n_sims} sims · seed {out.seed}.",
     ]
@@ -61,6 +61,49 @@ def _recommend(results: dict[str, StrategyResult]) -> str:
         return (float(np.mean(r.my_rank)), -float(np.median(r.my_points)))
 
     return min(results, key=key)
+
+
+def recommended_strategy(out: SimOutput) -> str:
+    """Public accessor for the recommended build (best finish distribution)."""
+    return _recommend(out.results)
+
+
+def _short(name: str) -> str:
+    """Compact label for the draftboard grid: last name (or DEF team abbr), trimmed."""
+    return name.split()[-1][:9] if name else "—"
+
+
+def board_grid(out: SimOutput, name: str | None = None) -> str:
+    """A representative simulated draft as a round×slot text grid (Sleeper-style).
+
+    Columns are draft slots (your slot marked ``*`` and your picks in ``[brackets]``); rows are
+    rounds. The draft shown is the median-outcome sim for the recommended (or given) build.
+    """
+    name = name or recommended_strategy(out)
+    rosters = representative_draft(out, name)
+    pool = out.pool
+    teams, rounds = out.cfg.teams, out.cfg.rounds
+    my_team = out.my_slot - 1
+    w = 16
+
+    head = "     " + "".join(
+        f"{'S' + str(t + 1) + ('*' if t == my_team else ''):<{w}}" for t in range(teams)
+    )
+    lines = [
+        f"--- Representative simulated draft (build: {name}, median outcome) ---",
+        f"  round × slot; your column (S{out.my_slot}) marked * and your picks in [brackets]",
+        head,
+    ]
+    for rnd in range(1, rounds + 1):
+        row = f"R{rnd:>2}  "
+        for t in range(teams):
+            idx = rosters[t][rnd - 1]
+            cell = f"{_short(pool.names[idx])} {pool.pos[idx]}"
+            if t == my_team:
+                cell = f"[{cell}]"
+            row += f"{cell:<{w}}"
+        lines.append(row)
+    return "\n".join(lines)
 
 
 def build_comparison(out: SimOutput, recommended: str) -> str:

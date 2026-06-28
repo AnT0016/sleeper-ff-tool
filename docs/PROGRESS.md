@@ -198,6 +198,18 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
       `lineup_from_points`, `optimal_standings`) unit-tested; full suite **66 passed**. Validated on
       2025: actual 1996 / optimal 2307 / tool 1977 pts, 11-3 → optimal 12-2, 311 bench pts lost; the
       VOR draft would have added ~436 season points.
+- **Backtest "full-draft" views (follow-up):** three more retrospective views on real data, all from
+      pieces `build_backtest` already fetched (pure helpers `draftboard_rows` / `matchup_detail_rows`
+      / `transaction_rows` / `starting_slot_labels`, unit-tested in `tests/test_analysis.py`):
+      **🗂️ Draft board** — the real snake draft as a 12-team round×slot grid, each pick graded by
+      full-season points, my column starred; **⚔️ Matchups** — a week selector showing my whole
+      starting lineup vs my opponent's, slot-by-slot, scored by real points (W2 head-to-head sums
+      reconcile exactly to the weekly table: 116.60 vs 127.96); **🔁 Transactions** — the season's
+      completed adds/drops/trades (one row per roster per move; note these are *already* reflected in
+      the weekly lineups — the view just surfaces them). New tables in `backtest.db` (`draftboard`,
+      `matchup_detail`, `transactions`) + `my_draft_slot`/`n_transactions` meta. Validated on 2025
+      (168 board rows, 153 matchup rows, 267 transactions) and headless `AppTest` (19 tables, week
+      selector + transaction filter exercised).
 - **Next:** Phase 6 (optional Monte Carlo draft simulator).
 
 ## Phase 6 — (Optional) Monte Carlo draft simulator `[x]` DONE
@@ -242,12 +254,17 @@ reuses every earlier phase.
       typical composition; recommendation by best *finish distribution*, not best EV), (2) **target
       survival** — P(each top-VOR target is still on the board) at each of my picks, and (3) **injury
       insight** — which likely starters carry real durability risk *and* lack a rostered backup (where
-      you need a true handcuff vs. a streamer). Numpy added as an explicit dependency.
-- [x] Tests: [tests/test_draftsim.py](../tests/test_draftsim.py) (14 offline unit tests — lognormal
+      you need a true handcuff vs. a streamer). `--board` also prints a **representative simulated
+      draftboard** (all 12 teams, Sleeper-style round×slot grid) — the *median-outcome* sim for the
+      recommended build, reconstructed deterministically via `engine.representative_draft`. Numpy added
+      as an explicit dependency.
+- [x] **Pool tidy:** `build_pool` keeps the union of top-N by ADP + top-N by VOR + all K/DEF (~470 for
+      2025, vs an unbounded pool before), so `--pool-size` is meaningful and the run stays light.
+- [x] Tests: [tests/test_draftsim.py](../tests/test_draftsim.py) (16 offline unit tests — lognormal
       mean-preservation, bounded availability + risk tracking, FLEX-takes-best-leftover, mandatory
-      fill, K/DEF-never-early, zero-RB avoidance, bot caps, and an end-to-end synthetic run: legal
-      rosters, survival decreasing with later picks, common-random-numbers reproducibility). Full suite
-      **80 passed**; `ruff` clean.
+      fill, K/DEF-never-early, zero-RB avoidance, bot caps, end-to-end synthetic run (legal rosters,
+      survival decreasing with later picks, common-random-numbers reproducibility), plus the
+      representative-draft reconstruction + board rendering). Full suite **86 passed**; `ruff` clean.
 - [x] **Validated end-to-end** against the 2025 league (slot 7 read from `draft_order`, ~4s for 2000
       sims × 5 builds): survival flags match intuition (elite RB/WR ~30–45% to survive to pick #7, gone
       by the #18 turn; QBs slide to the late rounds under our 4-pt-pass-TD scoring); builds rank
