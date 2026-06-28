@@ -144,11 +144,47 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
   The waiver report prints UTF-8 explicitly (Windows console is cp1252).
 - **Next:** Phase 5 (hosted Streamlit dashboard + GitHub Actions weekly refresh + team-analysis views).
 
-## Phase 5 — Hosted season dashboard + weekly refresh `[ ]` TODO
-- [ ] Streamlit Community Cloud dashboard + team-analysis views
-- [ ] GitHub Actions weekly cron (Tue evening CEST, UTC best-effort) + `workflow_dispatch`,
-      commits updated data so Streamlit auto-redeploys
-- **Next:** Phase 6 (optional).
+## Phase 5 — Hosted season dashboard + weekly refresh `[x]` DONE
+- [x] **Decoupled compute from display:** the dashboard reads a single precomputed SQLite artifact
+      ([data_cache/season.db](../data_cache/season.db)) and **never** hits an API on page load. The
+      networked "ingest + recompute" pipeline ([src/analysis/snapshot.py](../src/analysis/snapshot.py))
+      reuses every earlier phase — `load_lineup_inputs` + `startsit` (Phase 3), `load_waiver_inputs` +
+      `spend_advice`/`rank_playoff_stashes`/`bye_stash_suggestions` (Phase 4) — and writes one table per
+      dashboard section + a single-row `meta` table via pandas `to_sql` (atomic temp-file + replace;
+      empty frames get a placeholder column so `to_sql` never emits invalid SQL).
+- [x] **Team-analysis views** ([src/analysis/team.py](../src/analysis/team.py), pure/offline): per-team
+      optimal-starter points per slot (reuses the Phase 3 `optimize()` on each of the 12 rosters), my
+      **positional strength ranking vs the league** with strength/average/weakness verdicts — computed
+      **both** season-long (stable roster quality, all eligible) **and** this-week (bye/injury-aware);
+      **bye-week gaps** (🔴 hole vs 🟡 forced-backup); **positional needs** (weakness + thin depth + bye
+      holes); **mutual-fit trade targets** (a team strong where I'm weak *and* weak where I'm strong);
+      and a **Weeks 15-17 playoff outlook** that reuses the Phase-4 SOS (`playoff_outlook` wraps
+      `rank_playoff_stashes` over my likely starters).
+- [x] **Hosted dashboard** ([apps/season_app.py](../apps/season_app.py)): offline, reads `season.db`
+      only. Tabs — **This Week** (optimal lineup, start/sit, risky flags, holes), **Waivers & Stash**
+      (handcuff/spend/stash/bye alerts), **Team Analysis** (strength matrix w/ Season vs This-week
+      toggle, needs, bye gaps, trade ideas surfaced before the Week-11 deadline, playoff outlook).
+      Caches keyed on the artifact mtime; guards cleanly when no snapshot exists.
+- [x] **Runnable refresh** ([scripts/refresh_data.py](../scripts/refresh_data.py)):
+      `python scripts/refresh_data.py [--week N --season Y]` — auto-detects the current season/week
+      from Sleeper state (off-season-safe) and writes `data_cache/season.db`.
+- [x] **GitHub Actions weekly cron** ([.github/workflows/refresh.yml](../.github/workflows/refresh.yml)):
+      `cron: 0 18 * * 2` (Tue 18:00 UTC ≈ Tue evening CEST/CET, before Wed 09:00 CEST waivers; UTC
+      best-effort) + `workflow_dispatch` with optional `week`/`season` inputs for off-season/ad-hoc
+      runs. `permissions: contents: write`, a `concurrency` guard, and a **no-op-safe** commit step
+      (`git diff --staged --quiet ||` commit+push) so empty diffs don't fail. Streamlit auto-redeploys
+      on the commit.
+- [x] Tests: [tests/test_analysis.py](../tests/test_analysis.py) (8 offline unit tests — slot points,
+      strength ranking + verdicts, bye hole/thin + `from_week` filter, needs fold, mutual-fit trades,
+      playoff SOS tilt). Full suite **62 passed**.
+- [x] **Validated end-to-end** (2025 Week 10): `refresh_data.py` builds `season.db` from cached data;
+      dashboard verified headless via Streamlit `AppTest` (3 tabs, 14 tables, metrics correct, Season↔
+      This-week toggle re-runs clean). Sanity: my team ranks RB #2/TE #2 (strengths), QB #10/WR #11
+      (weaknesses); QB flagged a Week-10 bye hole (Dak on bye); 3 mutual-fit trade partners surfaced;
+      playoff total 260.83 with per-week SOS multipliers. `ruff` clean.
+- **Connect to Streamlit Community Cloud:** see [apps/README.md](../apps/README.md) — public repo, no
+      secrets, free tier; point a new app at `apps/season_app.py` on `main`.
+- **Next:** Phase 6 (optional Monte Carlo draft simulator).
 
 ## Phase 6 — (Optional) Monte Carlo draft simulator `[ ]` TODO
 - [ ] Forward simulation of draft outcomes — build last, only if useful
