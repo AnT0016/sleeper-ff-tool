@@ -10,10 +10,13 @@ packages; no business logic lives here.
 
 - `season_app.py` — **hosted** season dashboard (Phase 5, **done**). `streamlit run apps/season_app.py`.
   Reads **only** the precomputed `data_cache/season.db` snapshot — it never calls an API on page load.
-  Three tabs: **This Week** (optimal lineup + start/sit + risky flags), **Waivers & Stash**
+  Four tabs: **This Week** (optimal lineup + start/sit + risky flags), **Waivers & Stash**
   (handcuff/spend/stash/bye alerts), **Team Analysis** (positional strength vs the league —
   season-long *and* this-week — bye-week gaps, positional needs, trade-target ideas before the
-  Week-11 deadline, and the Weeks 15–17 playoff outlook). The snapshot is rebuilt by
+  Week-11 deadline, and the Weeks 15–17 playoff outlook), and **📈 2025 Backtest** (a
+  completed-season "what if I'd used this tool" review — best-possible lineup vs what you started,
+  VOR draft vs your actual draft, season summary + weekly/league ranks — read from a separate
+  `data_cache/backtest.db` built by `scripts/backtest_2025.py`). The live snapshot is rebuilt by
   `scripts/refresh_data.py` (run by the weekly GitHub Actions cron, which commits it back).
 
 ## Deploy `season_app.py` on Streamlit Community Cloud (free)

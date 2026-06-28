@@ -183,7 +183,21 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
       (weaknesses); QB flagged a Week-10 bye hole (Dak on bye); 3 mutual-fit trade partners surfaced;
       playoff total 260.83 with per-week SOS multipliers. `ruff` clean.
 - **Connect to Streamlit Community Cloud:** see [apps/README.md](../apps/README.md) — public repo, no
-      secrets, free tier; point a new app at `apps/season_app.py` on `main`.
+      secrets, free tier; point a new app at `apps/season_app.py` on `main`. Deployed at
+      `sleeper-ff-tool` (public). Hosting note: Streamlit Cloud installs from `requirements.txt`
+      (hosted-app deps only — `streamlit`/`pandas`); `pyproject.toml` carries `[tool.poetry]
+      package-mode=false` / `[tool.uv] package=false` so a host never tries to build the src/ repo.
+- **Bonus — 2025 season backtest** ([src/analysis/backtest.py](../src/analysis/backtest.py),
+      [scripts/backtest_2025.py](../scripts/backtest_2025.py) → `data_cache/backtest.db`, "📈 2025
+      Backtest" tab): a completed-season "what if I'd used this tool" review. Scores every lineup by
+      **real** results (`matchups.players_points`, never trusting past-week projections): **weekly**
+      actual vs hindsight-optimal (points left on bench) vs the projection-lineup-scored-by-actuals;
+      **draft** replay (VOR-greedy at my real pick slots vs my actual picks, graded by full-season
+      points); **season summary** (actual vs optimal vs tool totals/records, recomputed "always-
+      optimal" standings); **league-wide** weekly ranks. Pure helpers (`simulate_draft`,
+      `lineup_from_points`, `optimal_standings`) unit-tested; full suite **66 passed**. Validated on
+      2025: actual 1996 / optimal 2307 / tool 1977 pts, 11-3 → optimal 12-2, 311 bench pts lost; the
+      VOR draft would have added ~436 season points.
 - **Next:** Phase 6 (optional Monte Carlo draft simulator).
 
 ## Phase 6 — (Optional) Monte Carlo draft simulator `[ ]` TODO

@@ -78,6 +78,34 @@ def show(df: pd.DataFrame, *, empty: str = "—", **kwargs) -> None:
         st.dataframe(df, hide_index=True, width="stretch", **kwargs)
 
 
+# --------------------------------------------------------------------------- backtest readers
+BACKTEST_DB = _ROOT / "data_cache" / "backtest.db"
+
+
+def _bt_mtime() -> float:
+    try:
+        return BACKTEST_DB.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(show_spinner=False)
+def load_bt(name: str, _mtime: float) -> pd.DataFrame:
+    try:
+        with sqlite3.connect(f"file:{BACKTEST_DB}?mode=ro", uri=True) as con:
+            return pd.read_sql_query(f"SELECT * FROM {name}", con)
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_bt_meta(_mtime: float) -> dict:
+    df = load_bt("meta", _mtime)
+    return {} if df.empty else df.iloc[0].to_dict()
+
+
+_RESULT_BADGE = {"W": "✅ W", "L": "❌ L", "T": "➖ T", "—": "—"}
+
+
 # --------------------------------------------------------------------------- guard: no snapshot yet
 if not DB_PATH.exists():
     st.title("🏈 Fantasy season dashboard")
@@ -109,7 +137,9 @@ if st.button("🔄 Reload snapshot"):
     st.cache_data.clear()
     st.rerun()
 
-tab_week, tab_waiver, tab_team = st.tabs(["📅 This Week", "🔁 Waivers & Stash", "📊 Team Analysis"])
+tab_week, tab_waiver, tab_team, tab_bt = st.tabs(
+    ["📅 This Week", "🔁 Waivers & Stash", "📊 Team Analysis", "📈 2025 Backtest"]
+)
 
 # =========================================================================== THIS WEEK
 with tab_week:
@@ -267,3 +297,106 @@ with tab_team:
         show(outlook[["name", "pos", "team", "playoff value", "raw", "SOS Δ", "n_tough", "weeks"]])
     else:
         show(outlook)
+
+# =========================================================================== 2025 BACKTEST
+with tab_bt:
+    if not BACKTEST_DB.exists():
+        st.info(
+            "No backtest artifact yet. Build it with:\n\n"
+            "```\n./.venv/Scripts/python scripts/backtest_2025.py --season 2025\n```\n\n"
+            "It replays a *completed* season: best-possible lineup vs what you started, and the "
+            "tool's VOR draft vs your actual draft — all scored by real results."
+        )
+    else:
+        bmt = _bt_mtime()
+        bm = load_bt_meta(bmt)
+        st.caption(
+            f"**{bm.get('my_team_name', '')}** · {bm.get('season', '')} season backtest · "
+            f"every lineup scored by *actual* results · generated {bm.get('generated_at', '')}"
+        )
+
+        # ----- season summary --------------------------------------------------------------
+        st.subheader("Season summary")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "Your actual", f"{bm.get('actual_total', 0):.0f} pts",
+            f"{bm.get('actual_record', '')} · #{bm.get('actual_rank', '?')}", delta_color="off",
+        )
+        c2.metric(
+            "Hindsight-optimal", f"{bm.get('optimal_total', 0):.0f} pts",
+            f"{bm.get('optimal_record', '')} · #{bm.get('optimal_rank', '?')}",
+        )
+        c3.metric(
+            "Left on the bench", f"{bm.get('bench_lost_total', 0):.0f} pts",
+            "best lineup every week", delta_color="off",
+        )
+        dmy, dtool = bm.get("draft_my_total", 0), bm.get("draft_tool_total", 0)
+        c4.metric(
+            "Tool's draft", f"{dtool:.0f} pts", f"{dtool - dmy:+.0f} vs your {dmy:.0f}",
+        )
+
+        weekly = load_bt("weekly", bmt)
+        if not weekly.empty:
+            flips = int(((weekly["result"] == "L") & (weekly["optimal_result"] == "W")).sum())
+            reg = weekly[~weekly["playoff"].astype(bool)]
+            st.markdown(
+                f"Starting your **best legal lineup every week** would have turned "
+                f"**{flips}** loss(es) into wins — a **{bm.get('actual_record','')} → "
+                f"**{bm.get('optimal_record','')}** regular season — and left **0** of those "
+                f"{bm.get('bench_lost_total', 0):.0f} bench points behind. "
+                f"Following the tool's *projection* lineup (scored by real results) went "
+                f"**{bm.get('tool_record','')}** ({bm.get('tool_total',0):.0f} pts) — proof that the "
+                f"edge is the optimizer's ceiling, not raw projections."
+            )
+
+            # ----- actual vs optimal vs tool, by week --------------------------------------
+            chart = weekly.set_index("week")[["actual", "optimal", "tool"]]
+            st.line_chart(chart, height=240)
+
+        sub_week, sub_draft = st.tabs(["📅 Weekly detail", "🏈 Draft replay"])
+
+        # ----- weekly detail ---------------------------------------------------------------
+        with sub_week:
+            st.caption(
+                "Each week: what you scored vs your real opponent, the best you *could* have scored, "
+                "points left on the bench, the single most costly bench call, and your weekly rank "
+                "(actual → optimal) among all 12 teams."
+            )
+            if weekly.empty:
+                st.caption("—")
+            else:
+                v = weekly.copy()
+                v["wk"] = v.apply(lambda r: f"{r['week']}{'*' if r['playoff'] else ''}", axis=1)
+                for col in ("result", "optimal_result", "tool_result"):
+                    v[col] = v[col].map(lambda x: _RESULT_BADGE.get(x, x))
+                v["rank a→o"] = v.apply(lambda r: f"{int(r['actual_rank'])}→{int(r['optimal_rank'])}", axis=1)
+                v = v.rename(columns={
+                    "opponent": "opp", "opp_pts": "opp pts", "result": "res",
+                    "optimal_result": "opt res", "bench_lost": "bench lost",
+                    "tool_result": "tool res", "top_miss": "biggest miss",
+                })
+                show(v[["wk", "opp", "actual", "opp pts", "res", "optimal", "opt res",
+                        "bench lost", "tool", "tool res", "rank a→o", "biggest miss"]])
+                st.caption("`*` = fantasy playoff week (not counted in the record).")
+
+        # ----- draft replay ----------------------------------------------------------------
+        with sub_draft:
+            st.caption(
+                "At each of your snake picks, the tool's best-available by VOR vs who you actually "
+                "took — each graded by full-season actual points. `diff` = tool − you."
+            )
+            draft = load_bt("draft", bmt)
+            if draft.empty:
+                st.caption("—")
+            else:
+                d = draft.rename(columns={
+                    "my_pick": "your pick", "my_pos": "pos", "my_pts": "your pts",
+                    "tool_pick": "tool pick", "tool_pos": "pos.", "tool_pts": "tool pts",
+                })
+                show(d[["pick", "round", "your pick", "pos", "your pts",
+                        "tool pick", "pos.", "tool pts", "diff"]])
+                st.caption(
+                    f"Tool draft total **{bm.get('draft_tool_total', 0):.0f}** vs your "
+                    f"**{bm.get('draft_my_total', 0):.0f}** season points "
+                    f"(**{bm.get('draft_tool_total', 0) - bm.get('draft_my_total', 0):+.0f}**)."
+                )

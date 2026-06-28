@@ -9,6 +9,7 @@ ranker). The networked snapshot path (``analysis.snapshot``) is exercised manual
 
 from __future__ import annotations
 
+from analysis.backtest import lineup_from_points, optimal_standings, simulate_draft
 from analysis.team import (
     PositionStrength,
     bye_week_gaps,
@@ -138,3 +139,56 @@ def test_playoff_outlook_sos_tilts_my_starters():
     out = playoff_outlook(starters, sos, opp)
     assert out[0].raw_value == 30.0 and out[0].adj_value == 45.0 and out[0].sos_swing == 15.0
     assert len(out[0].weeks) == 3
+
+
+# --------------------------------------------------------------------------- backtest helpers
+def test_simulate_draft_takes_best_vor_from_real_remaining_pool():
+    picks = [
+        {"pick_no": 1, "round": 1, "picked_by": "X", "player_id": "A"},   # other team takes A
+        {"pick_no": 2, "round": 1, "picked_by": "ME", "player_id": "Z1"},  # my pick -> tool acts
+        {"pick_no": 3, "round": 1, "picked_by": "X", "player_id": "B"},
+        {"pick_no": 4, "round": 1, "picked_by": "ME", "player_id": "Z2"},
+    ]
+    vor = {"A": 10.0, "B": 9.0, "C": 8.0, "D": 7.0}
+    pos = {"A": "RB", "B": "RB", "C": "RB", "D": "RB"}
+    rows = simulate_draft(picks, "ME", vor, pos, default_cap=99)
+    # A already gone -> tool takes B (9), then C (8); my actual picks recorded as my_pid.
+    assert [r["tool_pid"] for r in rows] == ["B", "C"]
+    assert [r["my_pid"] for r in rows] == ["Z1", "Z2"]
+
+
+def test_simulate_draft_respects_positional_caps():
+    picks = [
+        {"pick_no": 1, "round": 1, "picked_by": "ME", "player_id": "Z1"},
+        {"pick_no": 2, "round": 1, "picked_by": "ME", "player_id": "Z2"},
+    ]
+    vor = {"Q1": 10.0, "Q2": 9.0, "R1": 5.0}
+    pos = {"Q1": "QB", "Q2": "QB", "R1": "RB"}
+    rows = simulate_draft(picks, "ME", vor, pos, caps={"QB": 1}, default_cap=99)
+    # QB cap of 1: tool takes the top QB once, then must take the RB (not a 2nd QB).
+    assert [r["tool_pid"] for r in rows] == ["Q1", "R1"]
+
+
+def test_lineup_from_points_picks_best_legal_lineup():
+    players_map = {
+        "q1": {"position": "QB", "team": "KC", "full_name": "QB1"},
+        "r1": {"position": "RB", "team": "SF", "full_name": "RB1"},
+        "r2": {"position": "RB", "team": "DET", "full_name": "RB2"},
+        "w1": {"position": "WR", "team": "MIA", "full_name": "WR1"},
+    }
+    pts = {"q1": 20.0, "r1": 15.0, "r2": 10.0, "w1": 12.0}
+    sol = lineup_from_points(["q1", "r1", "r2", "w1"], pts, players_map, {"QB": 1, "RB": 1, "FLEX": 1})
+    # QB q1 + RB r1 + FLEX best leftover (w1 12 > r2 10) = 47.
+    assert sol.total == 47.0
+    assert {sp.player.player_id for sp in sol.starters} == {"q1", "r1", "w1"}
+
+
+def test_optimal_standings_subs_my_optimal_into_head_to_head():
+    # 1 week, I actually lost 100-110; my optimal (115) flips it -> I should rank above the opponent.
+    matchups = {
+        1: [
+            {"roster_id": 1, "matchup_id": 9, "points": 100.0},
+            {"roster_id": 2, "matchup_id": 9, "points": 110.0},
+        ]
+    }
+    assert optimal_standings(matchups, my_roster_id=1, my_optimal_by_week={1: 115.0}) == [1, 2]
