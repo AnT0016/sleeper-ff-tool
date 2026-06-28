@@ -200,5 +200,59 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
       VOR draft would have added ~436 season points.
 - **Next:** Phase 6 (optional Monte Carlo draft simulator).
 
-## Phase 6 — (Optional) Monte Carlo draft simulator `[ ]` TODO
-- [ ] Forward simulation of draft outcomes — build last, only if useful
+## Phase 6 — (Optional) Monte Carlo draft simulator `[x]` DONE
+New package [src/draftsim/](../src/draftsim/) — a forward Monte Carlo sim of full 12-team snake drafts.
+**Directional draft-prep aid, not a core feature**: output is explicitly labelled heuristic, and every
+variance / ADP / injury assumption is printed alongside the numbers so they can be judged. Read-only;
+reuses every earlier phase.
+- [x] **Decisions ex-ante, evaluation ex-post** ([engine.py](../src/draftsim/engine.py)): each sim the
+      11 bots draft by *market* half-PPR ADP + noise and *I* draft by our *custom* VOR under a chosen
+      build; then each player's **season outcome is sampled** (not known to any drafter) and my
+      resulting roster's best legal lineup is scored on those samples. Aggregated over thousands of
+      drafts → a **distribution** of my season outcomes per build, not a point estimate. All builds
+      share the same sampled outcomes + noisy-ADP draws (**common random numbers**) so differences
+      reflect the strategy, not sampling noise.
+- [x] **Outcome + injury model** ([distributions.py](../src/draftsim/distributions.py)): season points
+      ~ **lognormal** (mean = our custom-scored projection; non-negative, right-skewed) with a
+      per-position **CV** (QB .18 / RB .32 / WR .30 / TE .35 / K .20 / DEF .28). Injuries = one
+      **significant setback** per season (Bernoulli per position; RB .45/4g … DEF .02/1g) → an
+      availability haircut on the season total. All knobs are heuristic, **not fitted** (stated in the
+      report).
+- [x] **ADP bots** ([bots.py](../src/draftsim/bots.py)): one shared noisy-ADP order per sim
+      (`adp + N(0,8)` picks), each bot taking the lowest available it has room for (caps: QB≤2, TE≤2,
+      K/DEF≤1, …; K/DEF only in the last ~22% of rounds). Bots using market half-PPR ADP while I use our
+      4-pt-passing-TD VOR is the **edge being quantified**, borrowing the joewlos "will my target
+      survive?" idea.
+- [x] **My strategies** ([strategy.py](../src/draftsim/strategy.py)): `best_vor`, `balanced`,
+      `rb_early`, `hero_rb`, `zero_rb` — each a per-round position-preference resolved by best **VOR**.
+      Shared guardrails: an end-of-draft **mandatory guard** that force-fills QB/K/DEF + the
+      RB/WR/TE/FLEX minimums so no build ever ends unable to field a legal lineup, **K/DEF never offered
+      early** (only taken by the guard — matches the "stream K/DEF" rule), and QB/TE capped at their
+      starting slot (you stream those, not stash a backup) so picks flow to RB/WR depth.
+- [x] **Fast lineup valuation** ([lineup.py](../src/draftsim/lineup.py)): greedy fill (optimal for a
+      single FLEX) scores rosters on sampled points without PuLP in the hot loop; `select_starters`
+      separates starters from bench depth for the injury report.
+- [x] **Live glue** ([inputs.py](../src/draftsim/inputs.py)): pulls live `scoring_settings` +
+      `roster_positions`, builds the custom-scored board (Phase 1 engine) + VOR with data-driven FLEX
+      (Phase 2), and resolves my slot — **revealed `draft_order`** if out, else `--slot`, else a
+      middle-slot fallback (CLAUDE.md keeps prep slot-agnostic until the slot is revealed).
+- [x] **Runnable** ([scripts/draft_sim.py](../scripts/draft_sim.py)):
+      `python scripts/draft_sim.py [--slot N --sims 2000 --season Y --strategies a,b]`. Prints (1) the
+      **build comparison** (p10/median/p90 of my season points + mean finish rank, P(top-3), P(win),
+      typical composition; recommendation by best *finish distribution*, not best EV), (2) **target
+      survival** — P(each top-VOR target is still on the board) at each of my picks, and (3) **injury
+      insight** — which likely starters carry real durability risk *and* lack a rostered backup (where
+      you need a true handcuff vs. a streamer). Numpy added as an explicit dependency.
+- [x] Tests: [tests/test_draftsim.py](../tests/test_draftsim.py) (14 offline unit tests — lognormal
+      mean-preservation, bounded availability + risk tracking, FLEX-takes-best-leftover, mandatory
+      fill, K/DEF-never-early, zero-RB avoidance, bot caps, and an end-to-end synthetic run: legal
+      rosters, survival decreasing with later picks, common-random-numbers reproducibility). Full suite
+      **80 passed**; `ruff` clean.
+- [x] **Validated end-to-end** against the 2025 league (slot 7 read from `draft_order`, ~4s for 2000
+      sims × 5 builds): survival flags match intuition (elite RB/WR ~30–45% to survive to pick #7, gone
+      by the #18 turn; QBs slide to the late rounds under our 4-pt-pass-TD scoring); builds rank
+      `rb_early`≈`balanced`≈`best_vor` (mean rank ~3.1) clearly ahead of `zero_rb` (~4.2) — i.e. punting
+      RB is costly when the field drafts by standard ADP — and the injury insight flags RB/WR starters
+      lacking rostered depth.
+- **Limitation (stated):** VOR-greedy builds skew WR-heavy and don't value handcuff *correlation* or
+  lottery upside; treat builds as a starting point, and re-run with `--slot` once the real slot is out.
