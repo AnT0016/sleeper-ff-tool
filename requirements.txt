@@ -1,0 +1,11 @@
+# Runtime dependencies for the HOSTED dashboard (apps/season_app.py) on Streamlit Community Cloud.
+#
+# The dashboard only reads data_cache/season.db and renders tables, so it needs just these two
+# (sqlite3 / json / sys are in the standard library). Keeping this list minimal also keeps the
+# hosted app's cold start fast.
+#
+# The full pipeline dependencies (nflreadpy, polars, pulp, pyarrow, requests-cache, ...) live in
+# pyproject.toml and are only needed by the GitHub Actions weekly refresh job, which installs the
+# project with `pip install -e .`. Streamlit Cloud must NOT install those.
+streamlit>=1.40
+pandas>=2.2

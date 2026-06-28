@@ -38,3 +38,14 @@ pythonpath = ["src"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests", "apps"]
+
+# Some hosts (e.g. Streamlit Community Cloud) install from this file with Poetry/uv rather than
+# setuptools. We use a src/ layout with setuptools (above); tell Poetry/uv NOT to build this repo
+# as a package -- consumers only need the declared dependencies. Local dev and the GitHub Actions
+# refresh use `pip install -e .` (setuptools), which ignores these tool tables. The hosted dashboard
+# pulls its (smaller) dependency set from requirements.txt instead.
+[tool.poetry]
+package-mode = false
+
+[tool.uv]
+package = false
