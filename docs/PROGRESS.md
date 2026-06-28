@@ -188,7 +188,7 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
       (hosted-app deps only — `streamlit`/`pandas`); `pyproject.toml` carries `[tool.poetry]
       package-mode=false` / `[tool.uv] package=false` so a host never tries to build the src/ repo.
 - **Bonus — 2025 season backtest** ([src/analysis/backtest.py](../src/analysis/backtest.py),
-      [scripts/backtest_2025.py](../scripts/backtest_2025.py) → `data_cache/backtest.db`, "📈 2025
+      [scripts/backtest.py](../scripts/backtest.py) → `data_cache/backtest.db`, "📈 2025
       Backtest" tab): a completed-season "what if I'd used this tool" review. Scores every lineup by
       **real** results (`matchups.players_points`, never trusting past-week projections): **weekly**
       actual vs hindsight-optimal (points left on bench) vs the projection-lineup-scored-by-actuals;
@@ -273,3 +273,24 @@ reuses every earlier phase.
       lacking rostered depth.
 - **Limitation (stated):** VOR-greedy builds skew WR-heavy and don't value handcuff *correlation* or
   lottery upside; treat builds as a starting point, and re-run with `--slot` once the real slot is out.
+
+## 2026-readiness (follow-up) `[x]`
+Prep so the new 2026 league is a config change, not a code change. See
+[docs/2026_SETUP.md](2026_SETUP.md) for the full run checklist.
+- [x] **Season/league-agnostic tooling:** `scripts/backtest_2025.py` → [scripts/backtest.py](../scripts/backtest.py)
+      (git-mv, history preserved), now **defaults to the current Sleeper season** (like `draft_sim.py` /
+      `optimize_lineup.py`); safe to run mid-season (only finished weeks included). References updated
+      (app message, apps/README, data_cache/README, this log); the dashboard tab is now season-agnostic
+      ("📈 Backtest").
+- [x] **Sleeper-style lineup cards** ([apps/season_app.py](../apps/season_app.py)): the *This Week*
+      optimal lineup renders as cards (slot badge · Sleeper-CDN headshot/▣ DST logo · player · proj),
+      with the detailed table kept in an expander. Needed `player_id` added to the `lineup` snapshot rows.
+- [x] **Kickoff day/time per starter** ([src/analysis/snapshot.py](../src/analysis/snapshot.py)
+      `kickoff_by_team`): each starter card/row shows its game (e.g. `Sun 16:25 vs LAR`) from the
+      nflverse schedule (ET; LA→LAR normalized; best-effort). The optimizer still maximizes projected
+      points — kickoff time is **display-only**, for manual FLEX hedging at lock time.
+- [x] **Setup checklist:** [docs/2026_SETUP.md](2026_SETUP.md) — config (new `LEAGUE_ID`), mock-draft
+      rehearsal, prep→draft→in-season→retrospective run order, refresh cron, quick-reference table.
+- [x] Validated: `season.db` rebuilt (2025 W10) with `player_id`/`kickoff` populated (kickoffs internally
+      consistent — Achane MIA `vs BUF` ↔ DJ Moore BUF `@ MIA`); dashboard verified headless via `AppTest`
+      (card view renders, no exceptions). Full suite **86 passed**; `ruff` clean on changed files.

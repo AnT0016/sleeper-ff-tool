@@ -9,8 +9,11 @@ ranker). The networked snapshot path (``analysis.snapshot``) is exercised manual
 
 from __future__ import annotations
 
+import polars as pl
+
 from analysis import backtest
 from analysis.backtest import lineup_from_points, optimal_standings, simulate_draft
+from analysis.snapshot import kickoff_by_team
 from analysis.team import (
     PositionStrength,
     bye_week_gaps,
@@ -245,3 +248,21 @@ def test_transaction_rows_split_per_roster_and_drop_incomplete():
     me = next(r for r in trade if r["team"] == "Me")
     assert me["added"] == "P70" and me["dropped"] == "P80"
     assert not any(r["type"] == "free_agent" for r in rows)  # failed transaction filtered out
+
+
+def test_kickoff_by_team_labels_and_normalizes():
+    sched = pl.DataFrame(
+        {
+            "season": [2025, 2025],
+            "game_type": ["REG", "PRE"],
+            "week": [5, 5],
+            "weekday": ["Sunday", "Sunday"],
+            "gametime": ["13:00", "13:00"],
+            "home_team": ["LA", "ZZZ"],  # LA -> LAR; the PRE game must be ignored
+            "away_team": ["BUF", "YYY"],
+        }
+    )
+    k = kickoff_by_team(2025, 5, fetch_schedules=lambda s: sched)
+    assert k["LAR"] == "Sun 13:00 vs BUF"
+    assert k["BUF"] == "Sun 13:00 @ LAR"
+    assert "ZZZ" not in k and "YYY" not in k  # preseason filtered out

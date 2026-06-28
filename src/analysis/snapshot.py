@@ -24,8 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import polars as pl
 
 from analysis import team
+from data import nflverse
 from optimizer.inputs import (
     STARTABLE_POSITIONS,
     assemble_players,
@@ -63,6 +65,41 @@ def _n_tough(weeks: Sequence) -> int:
 def _usage_str(usage: Mapping, pid: str) -> str:
     sig = usage.get(pid)
     return sig.summary() if sig else ""
+
+
+#: nflverse uses a couple of abbreviations that differ from Sleeper's; normalize to Sleeper's.
+_NFLVERSE_TO_SLEEPER: dict[str, str] = {"LA": "LAR"}
+
+
+def kickoff_by_team(
+    season: int,
+    week: int,
+    *,
+    fetch_schedules=nflverse.load_schedules,
+) -> dict[str, str]:
+    """``team -> "Sun 13:00 vs DAL"`` kickoff labels for the week (best-effort; ``{}`` on failure).
+
+    Times are the schedule's ET kickoff. Lets the dashboard surface game day/time per starter so a
+    FLEX call can be hedged manually — the optimizer itself maximizes projected points, not timing.
+    """
+    try:
+        sched = fetch_schedules(season)
+        reg = sched.filter(
+            (pl.col("game_type") == "REG") & (pl.col("season") == season) & (pl.col("week") == week)
+        )
+        out: dict[str, str] = {}
+        for r in reg.iter_rows(named=True):
+            label = f"{(r.get('weekday') or '')[:3]} {r.get('gametime') or ''}".strip()
+            home = _NFLVERSE_TO_SLEEPER.get(r.get("home_team"), r.get("home_team"))
+            away = _NFLVERSE_TO_SLEEPER.get(r.get("away_team"), r.get("away_team"))
+            if home:
+                out[home] = f"{label} vs {away}"
+            if away:
+                out[away] = f"{label} @ {home}"
+        return out
+    except Exception:  # schedule fetch is non-critical -- never sink a snapshot over it
+        _LOG.warning("could not load kickoff times for %s week %s", season, week)
+        return {}
 
 
 def team_names_by_roster(rosters: Sequence[Mapping], users: Sequence[Mapping]) -> dict[int, str]:
@@ -148,13 +185,16 @@ def build_snapshot(
     sol = optimize(lineup_inp.players, lineup_inp.slots)
     risky = {id(f.player): "; ".join(f.reasons) for f in risky_starts(sol, lineup_inp.players)}
 
+    kickoffs = kickoff_by_team(season, week)
     lineup_rows = [
         {
             "slot": sp.slot,
+            "player_id": sp.player.player_id,
             "name": sp.player.name,
             "pos": sp.player.pos,
             "team": sp.player.team or "",
             "proj": sp.player.proj_pts,
+            "kickoff": kickoffs.get(sp.player.team or "", ""),
             "status": sp.player.status or "",
             "flags": risky.get(id(sp.player), ""),
         }

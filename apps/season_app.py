@@ -78,6 +78,49 @@ def show(df: pd.DataFrame, *, empty: str = "—", **kwargs) -> None:
         st.dataframe(df, hide_index=True, width="stretch", **kwargs)
 
 
+# --------------------------------------------------------------------------- Sleeper-style lineup cards
+_POS_COLOR = {
+    "QB": "#c0392b", "RB": "#27ae60", "WR": "#2980b9", "TE": "#e67e22",
+    "K": "#8e44ad", "DEF": "#7f8c8d", "FLEX": "#16a085",
+}
+
+
+def _slot_badge(slot: str) -> str:
+    color = _POS_COLOR.get(str(slot), "#555")
+    return (
+        f"<span style='background:{color};color:#fff;padding:3px 9px;border-radius:6px;"
+        f"font-size:0.8em;font-weight:700'>{slot}</span>"
+    )
+
+
+def _headshot(pid: str, pos: str) -> str:
+    """Sleeper CDN image: a team logo for DST (id == team abbr), else the player's thumbnail."""
+    if pos == "DEF":
+        return f"https://sleepercdn.com/images/team_logos/nfl/{pid.lower()}.png"
+    return f"https://sleepercdn.com/content/nfl/players/thumb/{pid}.jpg"
+
+
+def render_lineup_cards(df: pd.DataFrame) -> None:
+    """Render the optimal lineup as Sleeper-style cards: slot badge · headshot · player · proj."""
+    for _, r in df.iterrows():
+        pid, pos = str(r.get("player_id") or ""), str(r.get("pos") or "")
+        with st.container(border=True):
+            c_badge, c_img, c_main, c_proj = st.columns([0.7, 0.7, 5, 1.1])
+            c_badge.markdown(_slot_badge(str(r["slot"])), unsafe_allow_html=True)
+            if pid:
+                c_img.image(_headshot(pid, pos), width=44)
+            meta = f"{pos} · {r['team']}"
+            if str(r.get("kickoff") or ""):
+                meta += f" · 🕐 {r['kickoff']}"
+            c_main.markdown(f"**{r['name']}**  \n{meta}")
+            flag, status = str(r.get("flags") or ""), str(r.get("status") or "")
+            if flag:
+                c_main.markdown(f":orange[⚠ {flag}]")
+            elif status:
+                c_main.markdown(f":orange[{status}]")
+            c_proj.markdown(f"### {float(r['proj']):.1f}")
+
+
 # --------------------------------------------------------------------------- backtest readers
 BACKTEST_DB = _ROOT / "data_cache" / "backtest.db"
 
@@ -138,7 +181,7 @@ if st.button("🔄 Reload snapshot"):
     st.rerun()
 
 tab_week, tab_waiver, tab_team, tab_bt = st.tabs(
-    ["📅 This Week", "🔁 Waivers & Stash", "📊 Team Analysis", "📈 2025 Backtest"]
+    ["📅 This Week", "🔁 Waivers & Stash", "📊 Team Analysis", "📈 Backtest"]
 )
 
 # =========================================================================== THIS WEEK
@@ -152,9 +195,16 @@ with tab_week:
         st.warning("⚠ No eligible player for: " + ", ".join(f"{n}× {s}" for s, n in holes.items()))
 
     st.subheader("Optimal starting lineup")
-    show(load_table("lineup", mt), empty="No lineup in the snapshot.")
-
     lineup = load_table("lineup", mt)
+    if lineup.empty:
+        st.caption("No lineup in the snapshot.")
+    else:
+        render_lineup_cards(lineup)
+        with st.expander("Detailed table"):
+            cols = [c for c in ["slot", "name", "pos", "team", "proj", "kickoff", "status", "flags"]
+                    if c in lineup.columns]
+            show(lineup[cols])
+
     risky = lineup[lineup["flags"].astype(str).str.len() > 0] if not lineup.empty else pd.DataFrame()
     if not risky.empty:
         st.subheader("⚠ Risky starts")
@@ -303,7 +353,7 @@ with tab_bt:
     if not BACKTEST_DB.exists():
         st.info(
             "No backtest artifact yet. Build it with:\n\n"
-            "```\n./.venv/Scripts/python scripts/backtest_2025.py --season 2025\n```\n\n"
+            "```\n./.venv/Scripts/python scripts/backtest.py --season 2025\n```\n\n"
             "It replays a *completed* season: best-possible lineup vs what you started, and the "
             "tool's VOR draft vs your actual draft — all scored by real results."
         )
