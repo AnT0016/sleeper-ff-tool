@@ -475,3 +475,26 @@ differ at the tails (as a favorite you want a high floor; as an underdog, a high
       deltas). Full suite **120 passed**; `ruff` clean. **Validated live** (2025 W10: 61% vs Saquonda
       forever, proj 82.7 vs 74.2; as a favorite every swap correctly lowers win% — "keep"; table + meta
       serialize; committed `season.db` untouched).
+
+## In-season levers — player-for-player trade evaluator `[x]` DONE
+Plan B, part 3. Upgrades the coarse mutual-fit `trade_targets` (which only named *positions*) into
+concrete, gradeable offers.
+- [x] **Win-win finder** ([analysis/trades.py](../src/analysis/trades.py) `find_trades`, pure): scans
+      every 1-for-1 skill swap with every other team and keeps those where **both** sides' best starting
+      lineup improves (season-long, in our scoring). Each player is valued by his *marginal* lineup
+      effect (`lineup_value` via the fast greedy single-FLEX total — no LP, so the full league scan is
+      milliseconds). K/DEF excluded (streamed, not traded). Ranked by *my* gain, with the partner's gain
+      shown so I can judge how sellable it is (`min_gain=1.0` so the partner isn't made worse).
+- [x] **Surfaced**: a new [scripts/trade_finder.py](../scripts/trade_finder.py) CLI, a `trade_offers`
+      snapshot table ([snapshot.py](../src/analysis/snapshot.py), reusing the per-team season lineups
+      already built for the strength matrix), and a **🤝 Trade offers** section atop the dashboard's
+      **Team Analysis** tab (the coarse positional-fit ideas kept below as context).
+- [x] Tests: [tests/test_trades.py](../tests/test_trades.py) (4 offline — greedy lineup value, a
+      complementary RB-deep/WR-poor pair yields a win-win swap, identical rosters yield none, K/DEF never
+      offered). Full suite **124 passed**; `ruff` clean.
+- [x] **Validated live** (2025): correctly finds e.g. *give benched Chris Rodriguez (RB) → get Rashee
+      Rice (WR)*, **+81.9** to my lineup / **+2.0** to theirs — the lopsided-for-me "buy from depth"
+      deals the positional table never surfaced; `trade_offers` serializes (scratch DB; committed
+      `season.db` untouched). **Limitation (stated):** 1-for-1 only (no 2-for-1 consolidation yet), and
+      values roster quality by season projection — it doesn't model positional scarcity beyond the
+      lineup or a partner's willingness.

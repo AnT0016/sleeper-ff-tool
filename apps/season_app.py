@@ -320,7 +320,25 @@ with tab_team:
     elif week and week >= deadline:
         st.info(f"Trade deadline (Week {deadline}) has passed — trades are closed.")
 
-    st.subheader("💡 Trade-target ideas")
+    st.subheader("🤝 Trade offers — win-win 1-for-1 swaps")
+    st.caption(
+        "Concrete player-for-player deals where **both** teams' best starting lineup improves "
+        "(season-long, in our scoring). 'gain' = season points added to each side's optimal lineup — "
+        "a deal the partner has a real reason to accept."
+    )
+    offers = load_table("trade_offers", mt)
+    if offers.empty:
+        st.caption("No win-win 1-for-1 fits right now (need a swap that upgrades both lineups).")
+    else:
+        v = offers.copy()
+        v["you give"] = v.apply(lambda r: f"{r['give']} ({r['give_pos']})", axis=1)
+        v["you get"] = v.apply(lambda r: f"{r['get']} ({r['get_pos']})", axis=1)
+        v = v.rename(columns={"my_gain": "your gain", "their_gain": "their gain"})
+        show(v[["partner", "you give", "you get", "your gain", "their gain"]])
+
+    st.divider()
+
+    st.subheader("💡 Trade-target ideas (positional fit)")
     st.caption("Teams strong where you're weak **and** weak where you're strong (mutual fit).")
     trades = load_table("trades", mt)
     if trades.empty:

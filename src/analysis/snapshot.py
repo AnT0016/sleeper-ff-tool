@@ -27,6 +27,7 @@ import pandas as pd
 import polars as pl
 
 from analysis import team
+from analysis.trades import find_trades
 from data import nflverse
 from optimizer.inputs import (
     STARTABLE_POSITIONS,
@@ -364,9 +365,11 @@ def build_snapshot(
 
     starters_season: dict[int, list] = {}
     starters_week: dict[int, list] = {}
+    season_players_by_team: dict[int, list] = {}
     for r in rosters:
         rid = int(r.get("roster_id"))
         sea_players = _season_lineup_players(r, w.players_map, season_scored)
+        season_players_by_team[rid] = sea_players
         starters_season[rid] = optimize(sea_players, w.slots).starters
         wk_players, _ = assemble_players(r, w.players_map, w.scored, byes_this_week)
         starters_week[rid] = optimize(wk_players, w.slots).starters
@@ -380,6 +383,11 @@ def build_snapshot(
     bye_gaps = team.bye_week_gaps(my_season_players, w.bye_week_of_team, w.slots, from_week=week)
     needs = team.positional_needs(season_strengths, my_season_players, w.slots, bye_gaps)
     trades = team.trade_targets(season_pts, my_rid, names, season_strengths)
+    trade_offers = find_trades(
+        season_players_by_team.get(my_rid, my_season_players),
+        {rid: pls for rid, pls in season_players_by_team.items() if rid != my_rid},
+        w.slots, names,
+    )
     outlook = team.playoff_outlook(w.my_starters, w.sos, w.opponents_by_week)
 
     def _strength_rows(strengths: Sequence[team.PositionStrength]):
@@ -453,6 +461,20 @@ def build_snapshot(
             ]
         ),
         "playoff_outlook": pd.DataFrame(playoff_rows),
+        "trade_offers": pd.DataFrame(
+            [
+                {
+                    "partner": o.partner,
+                    "give": o.give_name,
+                    "give_pos": o.give_pos,
+                    "get": o.get_name,
+                    "get_pos": o.get_pos,
+                    "my_gain": o.my_gain,
+                    "their_gain": o.their_gain,
+                }
+                for o in trade_offers
+            ]
+        ),
         "winprob": pd.DataFrame(winprob_rows),
         "unjoined": pd.DataFrame(
             [{"player_id": pid, "name": name} for pid, name in lineup_inp.unjoined]
