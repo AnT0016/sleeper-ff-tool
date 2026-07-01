@@ -66,6 +66,12 @@ def get_matchups(league_id: str, week: int) -> list[dict]:
     return _get(f"{V1}/league/{league_id}/matchups/{week}")
 
 
+def get_winners_bracket(league_id: str) -> list[dict]:
+    """Playoff winners bracket: per match ``r``(ound) / ``m`` / ``t1`` / ``t2`` / ``w``(inner) /
+    ``l``(oser), plus ``p`` on placement games (``p == 1`` is the championship game)."""
+    return _get(f"{V1}/league/{league_id}/winners_bracket")
+
+
 def get_transactions(league_id: str, week: int) -> list[dict]:
     """Waiver/free-agent/trade transactions for a scoring period (``week`` == round)."""
     return _get(f"{V1}/league/{league_id}/transactions/{week}")

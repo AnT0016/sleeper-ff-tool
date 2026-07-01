@@ -212,6 +212,29 @@ Legend: `[ ]` TODO · `[~]` in progress · `[x]` done
       selector + transaction filter exercised).
 - **Next:** Phase 6 (optional Monte Carlo draft simulator).
 
+## Multi-season backtest validation (2022–2025) `[x]`
+Backtested all four of the league's seasons (chain-walked via `previous_league_id`; season projections
++ real results exist for every year). The VOR-draft edge and the optimizer edge are **consistent, not a
+2025 fluke**:
+
+| Season | actual | optimal | bench left | record → optimal | VOR-draft edge |
+|--------|-------:|--------:|-----------:|:----------------:|---------------:|
+| 2022 | 1661 | 1881 | 220 | 9-5 → 10-4 | +897 |
+| 2023 | 1766 | 1930 | 165 | 5-9 → 6-8 | +850 |
+| 2024 | 1662 | 1881 | 219 | 6-8 → 9-5 | +755 |
+| 2025 | 1996 | 2307 | 311 | 11-3 → 12-2 | +436 |
+
+~229 bench points left/year; a VOR draft would have added **+436…+897 real points/year** (avg +734).
+**Caveat:** the draft edge uses each season's Sleeper *season projections* (may carry some hindsight for
+completed years) and grades draft-capital points — so treat the magnitudes as directional; the
+*direction* (4-for-4) is the robust signal.
+
+**Championships (winners bracket):** actual titles 2022–2025 = **0/4**. With always-optimal lineups
+(bracket/opponents held fixed) the tool doesn't hand a title either, but it flips **2024 from missing
+the playoffs (9th) to a #2 seed**; 2022 & 2025 made the playoffs (deeper runs not simulated — opponent
+cascade). The edge shows up as *reaching* the playoffs and leaving nothing on the bench, not guaranteed
+rings (3-game playoffs are high-variance). Added `client.get_winners_bracket` for the bracket pull.
+
 ## Phase 6 — (Optional) Monte Carlo draft simulator `[x]` DONE
 New package [src/draftsim/](../src/draftsim/) — a forward Monte Carlo sim of full 12-team snake drafts.
 **Directional draft-prep aid, not a core feature**: output is explicitly labelled heuristic, and every
