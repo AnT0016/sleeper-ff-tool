@@ -194,6 +194,36 @@ with tab_week:
     if holes:
         st.warning("⚠ No eligible player for: " + ", ".join(f"{n}× {s}" for s, n in holes.items()))
 
+    wprob = meta.get("win_prob", -1)
+    if wprob is not None and float(wprob) >= 0:
+        st.subheader("🎲 Win probability this week")
+        lv = str(meta.get("leverage", ""))
+        lv_badge = {
+            "favorite": "🟢 favorite", "underdog": "🔴 underdog", "toss-up": "🟡 toss-up",
+        }.get(lv, lv)
+        w1, w2, w3 = st.columns(3)
+        w1.metric(f"P(win) vs {meta.get('opp_name', 'opponent')}", f"{float(wprob):.0%}")
+        w2.metric("Your projection", f"{meta.get('lineup_total', 0):.1f}")
+        w3.metric("Opponent projection", f"{meta.get('opp_proj', 0):.1f}")
+        st.caption(f"**{lv_badge}** — {meta.get('leverage_note', '')}")
+
+        wpt = load_table("winprob", mt)
+        if not wpt.empty:
+            st.markdown("**Start/sit leverage — swaps that move your win odds**")
+            v = wpt.copy()
+            v["Δ win%"] = (v["delta_winprob"] * 100).map(lambda x: f"{x:+.1f}%")
+            v["Δ proj"] = v["delta_proj"].map(lambda x: f"{x:+.1f}")
+            v = v.rename(columns={
+                "bench": "start (bench)", "bench_pos": "pos", "starter": "over (starter)",
+            })
+            show(v[["start (bench)", "pos", "over (starter)", "slot", "Δ win%", "Δ proj"]])
+            st.caption(
+                "A **+Δ win%** with a **−Δ proj** = start the upside play: it lifts your win odds "
+                "despite fewer projected points (underdog leverage). When you're a favorite the "
+                "reverse holds — protect the floor."
+            )
+        st.divider()
+
     st.subheader("Optimal starting lineup")
     lineup = load_table("lineup", mt)
     if lineup.empty:

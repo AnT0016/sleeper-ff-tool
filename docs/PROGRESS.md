@@ -446,3 +446,32 @@ K/DEF via custom scoring"). Built it, plus the DEF strength-of-schedule it needs
 - [x] **Validated live** (2025 Week 10): DEF-SOS produces real playoff-matchup spread (BUF 20.2 / NYJ
       19.5 soft vs CLE 10.2 tough over Weeks 15-17); this-week ranking + Δ-vs-current + the `streamers`
       table serialize correctly (checked against a scratch DB; committed `season.db` untouched).
+
+## In-season levers — weekly win-probability start/sit `[x]` DONE
+Plan B, part 2. Reframes the weekly lineup as **P(win this week)**, not just projected points — the two
+differ at the tails (as a favorite you want a high floor; as an underdog, a high ceiling).
+- [x] **Win-probability core** ([optimizer/winprob.py](../src/optimizer/winprob.py), pure): simulate my
+      projection-optimal lineup vs **this week's real opponent** (each player a weekly lognormal draw)
+      → `p_win`, my floor/median/ceiling, and a favorite / toss-up / underdog **posture** with floor-vs-
+      ceiling guidance. Start/sit calls are then re-graded by their effect on win probability under
+      **common random numbers** (`startsit_leverage`): a swap's Δ(win%) vs its Δ(projection), so a
+      lower-projected bench player that *raises* your odds (underdog upside) is surfaced.
+- [x] **Modeling correction (important):** this single-week model uses **per-position single-game CVs**
+      (QB .45 … DEF .85), *not* Plan A's season CV × √17. Empirically, the √17 weekly CV is so skewed
+      (a 12-pt WR's median ≈ 7) that variance became pure downside and the leverage effect vanished;
+      with realistic single-game CVs the one-week distribution is sane (WR median ≈ 9.8 vs mean 12) and
+      the leverage direction is **correct and unit-tested** — higher variance helps an underdog
+      (+2 pts win%), hurts a favorite (−8 pts). Plan A's season sim is unchanged (skew washes out over
+      a season sum).
+- [x] **Opponent resolution** ([optimizer/inputs.py](../src/optimizer/inputs.py) `opponent_roster`):
+      the roster sharing my `matchup_id` this week (→ `None`, gracefully skipped, if unset). Reused by
+      both the CLI and the snapshot.
+- [x] **Surfaced**: a new [scripts/win_prob.py](../scripts/win_prob.py) CLI; `win_prob` / `opp_name` /
+      `opp_proj` / `leverage` meta + a `winprob` swap table in the snapshot
+      ([snapshot.py](../src/analysis/snapshot.py)); and a **🎲 Win probability** block atop the
+      dashboard's **This Week** tab (P(win) vs opponent, posture, and the leverage-swap table).
+- [x] Tests: [tests/test_winprob.py](../tests/test_winprob.py) (7 offline — coin-flip symmetry, dominant
+      lineup, variance-helps-underdog / hurts-favorite, posture thresholds, swap wiring + optimal
+      deltas). Full suite **120 passed**; `ruff` clean. **Validated live** (2025 W10: 61% vs Saquonda
+      forever, proj 82.7 vs 74.2; as a favorite every swap correctly lowers win% — "keep"; table + meta
+      serialize; committed `season.db` untouched).

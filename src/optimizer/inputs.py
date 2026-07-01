@@ -73,6 +73,32 @@ def find_my_roster(rosters: Sequence[Mapping], user_id: str) -> dict:
     raise ValueError(f"no roster with owner_id={user_id} in this league")
 
 
+def opponent_roster(
+    matchups: Sequence[Mapping], rosters: Sequence[Mapping], my_roster_id: int
+) -> dict | None:
+    """This week's head-to-head opponent roster (the roster sharing my ``matchup_id``), or ``None``.
+
+    ``None`` when the week's matchups aren't set yet (pre-schedule) or I have no opponent — the caller
+    then skips win-probability rather than erroring.
+    """
+    my_mid = next(
+        (m.get("matchup_id") for m in matchups if int(m.get("roster_id")) == my_roster_id), None
+    )
+    if my_mid is None:
+        return None
+    opp_rid = next(
+        (
+            int(m["roster_id"])
+            for m in matchups
+            if m.get("matchup_id") == my_mid and int(m.get("roster_id")) != my_roster_id
+        ),
+        None,
+    )
+    if opp_rid is None:
+        return None
+    return next((dict(r) for r in rosters if int(r.get("roster_id")) == opp_rid), None)
+
+
 def score_projections(
     projection_rows: Iterable[Mapping], scoring: Mapping[str, float]
 ) -> dict[str, dict]:

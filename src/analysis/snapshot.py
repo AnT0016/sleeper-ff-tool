@@ -33,9 +33,11 @@ from optimizer.inputs import (
     assemble_players,
     find_my_roster,
     load_lineup_inputs,
+    opponent_roster,
 )
 from optimizer.lineup import LineupPlayer, optimize
 from optimizer.startsit import idle_players, risky_starts, start_sit_table
+from optimizer.winprob import leverage_note, startsit_leverage, win_probability
 from projections.board import build_board
 from sleeper import client
 from waivers.inputs import load_waiver_inputs
@@ -322,6 +324,38 @@ def build_snapshot(
     my_rid = int(my_roster.get("roster_id"))
     slot_order = list(w.slots.keys())
 
+    # --- B2: weekly win probability + leverage-aware start/sit vs this week's real opponent --------
+    opp = opponent_roster(sleeper.get_matchups(league_id, week), rosters, my_rid)
+    win_prob, opp_proj, opp_name = -1.0, 0.0, ""
+    leverage_label, leverage_txt = "", ""
+    winprob_rows: list[dict] = []
+    if opp:
+        opp_players, _ = assemble_players(opp, w.players_map, w.scored, lineup_inp.byes)
+        opp_sol = optimize(opp_players, lineup_inp.slots)
+        opp_means = [sp.player.proj_pts for sp in opp_sol.starters]
+        opp_pos = [sp.player.pos for sp in opp_sol.starters]
+        wp = win_probability(
+            [sp.player.proj_pts for sp in sol.starters],
+            [sp.player.pos for sp in sol.starters],
+            opp_means, opp_pos,
+        )
+        win_prob, opp_proj = wp.p_win, opp_sol.total
+        opp_name = names.get(int(opp.get("roster_id")), "opponent")
+        leverage_label, leverage_txt = leverage_note(wp.p_win)
+        _, swaps = startsit_leverage(lineup_inp.players, lineup_inp.slots, opp_means, opp_pos)
+        winprob_rows = [
+            {
+                "bench": s.bench.name,
+                "bench_pos": s.bench.pos,
+                "starter": s.starter.name,
+                "slot": s.slot or "",
+                "delta_proj": s.delta_proj,
+                "delta_winprob": s.delta_winprob,
+            }
+            for s in swaps
+            if abs(s.delta_winprob) >= 0.003
+        ]
+
     season_scored = {
         r.player_id: {"proj": r.proj_pts, "pos": r.pos, "team": r.team, "name": r.name}
         for r in build_board(season, w.scoring)
@@ -419,6 +453,7 @@ def build_snapshot(
             ]
         ),
         "playoff_outlook": pd.DataFrame(playoff_rows),
+        "winprob": pd.DataFrame(winprob_rows),
         "unjoined": pd.DataFrame(
             [{"player_id": pid, "name": name} for pid, name in lineup_inp.unjoined]
         ),
@@ -441,6 +476,11 @@ def build_snapshot(
         "holes": json.dumps(sol.holes),
         "playoff_total": round(sum(s.adj_value for s in outlook), 2),
         "trade_deadline_week": TRADE_DEADLINE_WEEK,
+        "win_prob": round(win_prob, 4),
+        "opp_name": opp_name,
+        "opp_proj": round(opp_proj, 2),
+        "leverage": leverage_label,
+        "leverage_note": leverage_txt,
     }
     return tables, meta
 
