@@ -22,20 +22,9 @@ try:
 except Exception:
     pass
 
-from analysis.snapshot import DEFAULT_DB, build_and_write
+from analysis.snapshot import DEFAULT_DB, build_and_write, offseason_skip_reason
 from sleeper import client
 from sleeper.config import LEAGUE_ID, MY_USER_ID
-
-
-def _default_season_week() -> tuple[int, int]:
-    """Current season + week from the Sleeper state, with off-season-safe fallbacks."""
-    try:
-        state = client.get_state()
-        season = int(state.get("season") or 2025)
-        week = int(state.get("week") or 0) or 1  # week is 0 in the off-season -> use 1
-        return season, week
-    except Exception:
-        return 2025, 1
 
 
 def main() -> None:
@@ -48,9 +37,20 @@ def main() -> None:
     ap.add_argument("--out", default=str(DEFAULT_DB), help="output SQLite path")
     args = ap.parse_args()
 
-    def_season, def_week = _default_season_week()
-    season = args.season or def_season
-    week = args.week or def_week
+    try:
+        state = client.get_state()
+    except Exception:
+        state = {}
+
+    # Off-season no-op: a scheduled run has no data to compute until the season kicks off, and the
+    # nflverse parquet 404s. Exit 0 (not a failure) so the weekly cron stays green; resumes on its own.
+    reason = offseason_skip_reason(state, args.week, args.season)
+    if reason:
+        print(f"Skipping refresh — {reason}.")
+        return
+
+    season = args.season or int(state.get("season") or 2025)
+    week = args.week or int(state.get("week") or 0) or 1  # week is 0 in the off-season -> use 1
 
     print(f"Refreshing season snapshot — {season} Week {week} (league {args.league}) → {args.out}")
     out = build_and_write(args.league, args.user, season, week, db_path=args.out)

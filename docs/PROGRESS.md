@@ -291,6 +291,12 @@ Prep so the new 2026 league is a config change, not a code change. See
       points — kickoff time is **display-only**, for manual FLEX hedging at lock time.
 - [x] **Setup checklist:** [docs/2026_SETUP.md](2026_SETUP.md) — config (new `LEAGUE_ID`), mock-draft
       rehearsal, prep→draft→in-season→retrospective run order, refresh cron, quick-reference table.
+- [x] **Off-season-safe weekly cron** (`snapshot.offseason_skip_reason` + `scripts/refresh_data.py`):
+      a *scheduled* refresh now **no-ops with exit 0** (green, no commit) when Sleeper isn't in a regular
+      season — previously it auto-detected the rolled-over 2026 season and crashed on the nflverse
+      `stats_player_week_2026.parquet` **404** (no data until games are played). An explicit
+      `--week`/`--season` still forces a run (backfill); it resumes on its own once `season_type` flips
+      to `regular`. Unit-tested.
 - [x] Validated: `season.db` rebuilt (2025 W10) with `player_id`/`kickoff` populated (kickoffs internally
       consistent — Achane MIA `vs BUF` ↔ DJ Moore BUF `@ MIA`); dashboard verified headless via `AppTest`
       (card view renders, no exceptions). Full suite **86 passed**; `ruff` clean on changed files.

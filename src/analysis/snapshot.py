@@ -102,6 +102,28 @@ def kickoff_by_team(
         return {}
 
 
+def offseason_skip_reason(
+    state: Mapping, week_arg: int | None, season_arg: int | None
+) -> str | None:
+    """Why a *scheduled* refresh should no-op, or ``None`` to proceed.
+
+    A fully-auto run (no explicit ``--week``/``--season``) is skipped when Sleeper isn't in a regular
+    season — in the off-/pre-season there is no nflverse data or projection to compute yet, and the
+    upstream parquet 404s. An explicit week or season override always runs (manual backfill), and an
+    unknown/empty state falls through to a normal build (offline dev). Once the season kicks off
+    (``season_type == "regular"``) the scheduled job resumes on its own.
+    """
+    if week_arg is not None or season_arg is not None:
+        return None
+    season_type = str((state or {}).get("season_type") or "")
+    if season_type and season_type != "regular":
+        return (
+            f"off-season (season_type={season_type!r}, week={(state or {}).get('week')}) — "
+            "nothing to refresh; leaving the last snapshot in place"
+        )
+    return None
+
+
 def team_names_by_roster(rosters: Sequence[Mapping], users: Sequence[Mapping]) -> dict[int, str]:
     """``roster_id -> team label`` (team name if set, else display name, else ``Team <id>``)."""
     name_by_uid: dict[str, str] = {}

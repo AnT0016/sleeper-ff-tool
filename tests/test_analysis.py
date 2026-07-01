@@ -13,7 +13,7 @@ import polars as pl
 
 from analysis import backtest
 from analysis.backtest import lineup_from_points, optimal_standings, simulate_draft
-from analysis.snapshot import kickoff_by_team
+from analysis.snapshot import kickoff_by_team, offseason_skip_reason
 from analysis.team import (
     PositionStrength,
     bye_week_gaps,
@@ -266,3 +266,14 @@ def test_kickoff_by_team_labels_and_normalizes():
     assert k["LAR"] == "Sun 13:00 vs BUF"
     assert k["BUF"] == "Sun 13:00 @ LAR"
     assert "ZZZ" not in k and "YYY" not in k  # preseason filtered out
+
+
+def test_offseason_skip_reason():
+    # Auto scheduled run: skip in the off/pre-season, run in the regular season.
+    assert offseason_skip_reason({"season_type": "off", "week": 0}, None, None)
+    assert offseason_skip_reason({"season_type": "pre", "week": 0}, None, None)
+    assert offseason_skip_reason({"season_type": "regular", "week": 3}, None, None) is None
+    # An explicit week/season override always runs (manual backfill), even off-season.
+    assert offseason_skip_reason({"season_type": "off"}, 15, 2025) is None
+    # Unknown/empty state falls through to a normal build (offline dev).
+    assert offseason_skip_reason({}, None, None) is None
