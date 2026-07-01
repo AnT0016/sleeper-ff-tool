@@ -153,9 +153,9 @@ def test_simulate_draft_takes_best_vor_from_real_remaining_pool():
         {"pick_no": 3, "round": 1, "picked_by": "X", "player_id": "B"},
         {"pick_no": 4, "round": 1, "picked_by": "ME", "player_id": "Z2"},
     ]
-    vor = {"A": 10.0, "B": 9.0, "C": 8.0, "D": 7.0}
+    vor_order = {"A": -10.0, "B": -9.0, "C": -8.0, "D": -7.0}  # -vor: smallest key = best VOR
     pos = {"A": "RB", "B": "RB", "C": "RB", "D": "RB"}
-    rows = simulate_draft(picks, "ME", vor, pos, default_cap=99)
+    rows = simulate_draft(picks, "ME", vor_order, pos, default_cap=99)
     # A already gone -> tool takes B (9), then C (8); my actual picks recorded as my_pid.
     assert [r["tool_pid"] for r in rows] == ["B", "C"]
     assert [r["my_pid"] for r in rows] == ["Z1", "Z2"]
@@ -166,11 +166,23 @@ def test_simulate_draft_respects_positional_caps():
         {"pick_no": 1, "round": 1, "picked_by": "ME", "player_id": "Z1"},
         {"pick_no": 2, "round": 1, "picked_by": "ME", "player_id": "Z2"},
     ]
-    vor = {"Q1": 10.0, "Q2": 9.0, "R1": 5.0}
+    vor_order = {"Q1": -10.0, "Q2": -9.0, "R1": -5.0}
     pos = {"Q1": "QB", "Q2": "QB", "R1": "RB"}
-    rows = simulate_draft(picks, "ME", vor, pos, caps={"QB": 1}, default_cap=99)
+    rows = simulate_draft(picks, "ME", vor_order, pos, caps={"QB": 1}, default_cap=99)
     # QB cap of 1: tool takes the top QB once, then must take the RB (not a 2nd QB).
     assert [r["tool_pid"] for r in rows] == ["Q1", "R1"]
+
+
+def test_simulate_draft_adp_baseline_takes_lowest_adp():
+    picks = [
+        {"pick_no": 1, "round": 1, "picked_by": "ME", "player_id": "Z1"},
+        {"pick_no": 2, "round": 1, "picked_by": "ME", "player_id": "Z2"},
+    ]
+    # ADP order: lower drafts first (order_key == ADP). B (adp 3) then A (adp 5).
+    adp_order = {"A": 5.0, "B": 3.0, "C": 8.0}
+    pos = {"A": "RB", "B": "WR", "C": "RB"}
+    rows = simulate_draft(picks, "ME", adp_order, pos, default_cap=99)
+    assert [r["tool_pid"] for r in rows] == ["B", "A"]
 
 
 def test_lineup_from_points_picks_best_legal_lineup():
@@ -266,6 +278,17 @@ def test_kickoff_by_team_labels_and_normalizes():
     assert k["LAR"] == "Sun 13:00 vs BUF"
     assert k["BUF"] == "Sun 13:00 @ LAR"
     assert "ZZZ" not in k and "YYY" not in k  # preseason filtered out
+
+
+def test_frozen_projections_round_trip(tmp_path):
+    from data.frozen import frozen_fetch, load_frozen_rows, save_frozen
+
+    rows = [{"player_id": "1", "player": {"position": "RB"}, "stats": {"pts_half_ppr": 210.0, "adp_half_ppr": 3.0}}]
+    save_frozen(2026, rows, frozen_at="2026-07-01", directory=tmp_path)
+    assert load_frozen_rows(2026, directory=tmp_path) == rows
+    # a build_board-compatible fetch returns the frozen rows regardless of args
+    fetch = frozen_fetch(2026, directory=tmp_path)
+    assert fetch(2026, positions=("RB",)) == rows
 
 
 def test_offseason_skip_reason():

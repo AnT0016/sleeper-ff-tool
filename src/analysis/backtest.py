@@ -99,37 +99,39 @@ def lineup_from_points(
 def simulate_draft(
     picks: Sequence[Mapping],
     my_user_id: str,
-    vor_by_id: Mapping[str, float],
+    order_key: Mapping[str, float],
     pos_by_id: Mapping[str, str],
     *,
     caps: Mapping[str, int] = DRAFT_CAPS,
     default_cap: int = 999,
 ) -> list[dict]:
-    """Replay the snake draft, substituting a VOR-greedy policy for *my* picks only.
+    """Replay the snake draft, substituting a greedy policy for *my* picks only.
 
     Other teams' picks are held fixed (they remove players from the pool as they really did); at each
-    of my pick numbers the tool takes the highest-VOR available player whose position is below its cap.
-    Returns ``[{pick_no, round, my_pid, tool_pid}, ...]`` for my picks, in order.
+    of my pick numbers the tool takes the available player with the **smallest** ``order_key`` whose
+    position is below its cap. Pass ``{pid: -vor}`` for a VOR-greedy draft, or an ADP key for a
+    market-ADP draft — this is how the backtest compares "draft by our VOR" to "draft by market ADP"
+    (the naive baseline) on the same real board. Returns ``[{pick_no, round, my_pid, tool_pid}, ...]``.
     """
     taken: set[str] = set()
     pos_count: dict[str, int] = defaultdict(int)
-    board_ids = list(vor_by_id)
+    board_ids = list(order_key)
     rows: list[dict] = []
     for pk in sorted(picks, key=lambda p: int(p["pick_no"])):
         pid = str(pk.get("player_id"))
         if str(pk.get("picked_by")) != str(my_user_id):
             taken.add(pid)  # another team drafts the player they really drafted
             continue
-        best_id, best_vor = None, float("-inf")
+        best_id, best_key = None, float("inf")
         for cand in board_ids:
             if cand in taken:
                 continue
             cpos = pos_by_id.get(cand)
             if pos_count[cpos] >= caps.get(cpos, default_cap):
                 continue
-            v = vor_by_id[cand]
-            if v > best_vor:
-                best_id, best_vor = cand, v
+            k = order_key[cand]
+            if k < best_key:
+                best_id, best_key = cand, k
         if best_id is not None:
             taken.add(best_id)
             pos_count[pos_by_id.get(best_id)] += 1
@@ -438,7 +440,6 @@ def build_backtest(
         repl = replacement_levels(board, draft_roster.base_starters(cfg),
                                   flex_slots=draft_roster.flex_slots_total(cfg))
         add_vor(board, repl)
-    vor_by_id = {p.player_id: p.vor for p in board}
     name_by_id = {p.player_id: p.name for p in board}
     pos_by_id = {p.player_id: p.pos for p in board}
     pick_meta = {str(pk["player_id"]): (pk.get("metadata") or {}) for pk in picks}
@@ -456,18 +457,34 @@ def build_backtest(
             return ""
         return pos_by_id.get(pid) or (pick_meta.get(pid) or {}).get("position") or ""
 
-    sim = simulate_draft(picks, user_id, vor_by_id, pos_by_id, default_cap=(cfg.rounds if cfg else 999))
+    # Two policies on the same real board: our VOR (order = -vor, highest first) and the naive market
+    # ADP baseline (order = ADP; undrafted players sort last, tie-broken by projection). Comparing them
+    # answers "does our custom VOR add value *over just drafting by ADP*", not only "over my picks".
+    _BIG = 1.0e6
+    vor_order = {p.player_id: -p.vor for p in board}
+    adp_order = {
+        p.player_id: (p.adp if p.adp != float("inf") else _BIG - p.proj_pts) for p in board
+    }
+    cap = cfg.rounds if cfg else 999
+    sim = simulate_draft(picks, user_id, vor_order, pos_by_id, default_cap=cap)
+    sim_adp = simulate_draft(picks, user_id, adp_order, pos_by_id, default_cap=cap)
+    adp_pid_by_pick = {r["pick_no"]: r["tool_pid"] for r in sim_adp}
+
     draft_rows = []
     for r in sim:
         my_pid, tool_pid = r["my_pid"], r["tool_pid"]
+        adp_pid = adp_pid_by_pick.get(r["pick_no"])
         my_p = round(season_pts.get(my_pid, 0.0), 1)
         tool_p = round(season_pts.get(tool_pid, 0.0), 1)
+        adp_p = round(season_pts.get(adp_pid, 0.0), 1)
         draft_rows.append(
             {
                 "pick": r["pick_no"], "round": r["round"],
                 "my_pick": _pname(my_pid), "my_pos": _ppos(my_pid), "my_pts": my_p,
                 "tool_pick": _pname(tool_pid), "tool_pos": _ppos(tool_pid), "tool_pts": tool_p,
+                "adp_pick": _pname(adp_pid), "adp_pos": _ppos(adp_pid), "adp_pts": adp_p,
                 "diff": round(tool_p - my_p, 1),
+                "diff_vs_adp": round(tool_p - adp_p, 1),
             }
         )
 
@@ -509,6 +526,7 @@ def build_backtest(
         "optimal_rank": optimal_rank_overall,
         "draft_my_total": round(sum(r["my_pts"] for r in draft_rows), 1),
         "draft_tool_total": round(sum(r["tool_pts"] for r in draft_rows), 1),
+        "draft_adp_total": round(sum(r["adp_pts"] for r in draft_rows), 1),
         "draft_id": str(draft_id),
         "my_draft_slot": int(my_draft_slot),
         "n_transactions": len(tx_rows),

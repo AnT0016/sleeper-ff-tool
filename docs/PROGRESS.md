@@ -225,9 +225,33 @@ Backtested all four of the league's seasons (chain-walked via `previous_league_i
 | 2025 | 1996 | 2307 | 311 | 11-3 → 12-2 | +436 |
 
 ~229 bench points left/year; a VOR draft would have added **+436…+897 real points/year** (avg +734).
-**Caveat:** the draft edge uses each season's Sleeper *season projections* (may carry some hindsight for
-completed years) and grades draft-capital points — so treat the magnitudes as directional; the
-*direction* (4-for-4) is the robust signal.
+
+**Baseline — does VOR beat just drafting ADP?** Yes, 4-for-4. Added an **ADP-draft baseline** to the
+replay (`simulate_draft` now takes a generic order key; ADP mode drafts by market ADP) and compared
+all three on real results:
+
+| Season | you | ADP draft | VOR draft | VOR−ADP |
+|--------|----:|----------:|----------:|--------:|
+| 2022 | 1809 | 2046 | 2706 | +660 |
+| 2023 | 1812 | 1896 | 2662 | +767 |
+| 2024 | 1758 | 2138 | 2514 | +375 |
+| 2025 | 2207 | 2349 | 2643 | +294 |
+
+Averaged: **VOR beats ADP +524/yr**, ADP beats my actual drafts +210/yr — so the tool's *isolated*
+value-add (custom re-scoring, on top of ADP) is the +524, not merely "I drafted below ADP". Both VOR
+and ADP are **ex-ante** strategies graded on **real results** — a clean apples-to-apples baseline.
+A projection-vs-actual check (2025) found top-60 rank agreement of **64%**, consistent with genuine
+*preseason* projections (a hindsight-leaked feed would be ~90%+), so the edge isn't a leakage artifact.
+**Caveats that remain:** grades draft-capital points (not lineup wins); one league whose non-standard
+scoring (4-pt pass TD, distance-based K, rich DST) makes re-scoring matter more than in a vanilla
+league; and it's still retrospective. The Backtest tab's Draft-replay now shows the ADP column + a
+"VOR edge over ADP" metric.
+
+**Toward a real forward test:** froze the **2026 preseason projections**
+([scripts/freeze_projections.py](../scripts/freeze_projections.py) →
+`data_cache/frozen/projections_season_2026.json`, immutable; [src/data/frozen.py](../src/data/frozen.py))
+so the tool can be graded **out-of-sample** on 2026 with zero hindsight — the one thing a retrospective
+backtest can't provide. Re-score later via `build_board(2026, scoring, fetch=frozen_fetch(2026))`.
 
 **Championships (winners bracket):** actual titles 2022–2025 = **0/4**. With always-optimal lineups
 (bracket/opponents held fixed) the tool doesn't hand a title either, but it flips **2024 from missing

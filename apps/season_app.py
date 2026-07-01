@@ -434,24 +434,30 @@ with tab_bt:
         # ----- draft replay ----------------------------------------------------------------
         with sub_draft:
             st.caption(
-                "At each of your snake picks, the tool's best-available by VOR vs who you actually "
-                "took — each graded by full-season actual points. `diff` = tool − you."
+                "At each of your snake picks: our **VOR** pick vs the naive **market-ADP** pick vs who "
+                "you **actually** took — all graded by full-season actual points. The ADP column is the "
+                "honest baseline: does drafting in *our* scoring beat just following ADP?"
             )
             draft = load_bt("draft", bmt)
             if draft.empty:
                 st.caption("—")
             else:
+                vor_t = bm.get("draft_tool_total", 0)
+                adp_t = bm.get("draft_adp_total", 0)
+                my_t = bm.get("draft_my_total", 0)
+                m1, m2, m3 = st.columns(3)
+                m1.metric("VOR draft", f"{vor_t:.0f}", f"{vor_t - my_t:+.0f} vs you")
+                m2.metric("ADP draft (baseline)", f"{adp_t:.0f}",
+                          f"{adp_t - my_t:+.0f} vs you", delta_color="off")
+                m3.metric("VOR edge over ADP", f"{vor_t - adp_t:+.0f}", "the tool's real value-add")
                 d = draft.rename(columns={
                     "my_pick": "your pick", "my_pos": "pos", "my_pts": "your pts",
-                    "tool_pick": "tool pick", "tool_pos": "pos.", "tool_pts": "tool pts",
+                    "tool_pick": "VOR pick", "tool_pos": "pos.", "tool_pts": "VOR pts",
+                    "adp_pick": "ADP pick", "adp_pos": "pos..", "adp_pts": "ADP pts",
                 })
-                show(d[["pick", "round", "your pick", "pos", "your pts",
-                        "tool pick", "pos.", "tool pts", "diff"]])
-                st.caption(
-                    f"Tool draft total **{bm.get('draft_tool_total', 0):.0f}** vs your "
-                    f"**{bm.get('draft_my_total', 0):.0f}** season points "
-                    f"(**{bm.get('draft_tool_total', 0) - bm.get('draft_my_total', 0):+.0f}**)."
-                )
+                cols = ["pick", "round", "your pick", "pos", "your pts", "VOR pick", "pos.",
+                        "VOR pts", "ADP pick", "pos..", "ADP pts", "diff_vs_adp"]
+                show(d[[c for c in cols if c in d.columns]])
 
         # ----- weekly head-to-head ---------------------------------------------------------
         with sub_h2h:
