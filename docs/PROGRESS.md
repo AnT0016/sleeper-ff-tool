@@ -415,3 +415,34 @@ Phase 1/2 board.
 - **Limitations (stated):** no in-season trades/waivers (rosters fixed → **understates** the streaming/bye
   edge, so odds are a floor); no byes; independent weeks; the `opp_noise` skill gap is a heuristic knob,
   not fitted. Directional — a single real season is one draw from this distribution.
+
+## In-season levers — weekly K/DEF streaming + DEF strength-of-schedule `[x]` DONE
+Plan B (tighten the in-season levers). An audit found 5 of 7 levers already surfaced in the dashboard;
+the one real gap was **weekly K/DEF streaming**, which CLAUDE.md calls the tool's core edge ("stream
+K/DEF via custom scoring"). Built it, plus the DEF strength-of-schedule it needs.
+- [x] **DEF strength-of-schedule** ([waivers/sos.py](../src/waivers/sos.py) `points_allowed_to_def` +
+      `def_sos_multipliers` + `merge_sos`): re-score each prior week's DST lines in our scoring and
+      attribute them to the **offense faced** → how generous each offense is to opposing defenses
+      (`>1` soft, `<1` tough). The existing SOS only covered QB/RB/WR/TE ("K/DEF stream on other
+      logic"); this fills the DEF blind spot and merges under a `"DEF"` key into the same `sos` map.
+      Kickers deliberately get **no** SOS — a kicker's output rides its *own* offense, not the opponent,
+      so a "points allowed to K" signal is noise (documented).
+- [x] **Weekly streaming guide** ([waivers/streaming.py](../src/waivers/streaming.py) `rank_streamers`,
+      pure): best available K/DEF **this week** in our scoring, ranked by projection, with the **edge
+      over my current starter** (`Δ`) and a **stream/hold** verdict (a scarce reverse-priority claim
+      needs a real ≥1.5-pt edge). Alongside each option a **horizon**: next week + rest-of-season
+      per-game + a **Weeks 15-17 playoff outlook** (DEF tilted by the DEF-SOS above; K flat) — so a
+      one-week plug is told apart from a defense worth grabbing early for the playoff run.
+- [x] **Glue** ([waivers/inputs.py](../src/waivers/inputs.py)): builds the DEF-SOS (a `get_stats` DST
+      loop over prior weeks), the horizon projections (this/next-week weekly + season projections
+      re-scored), and the FA candidate/current-starter sets. **Surfaced everywhere**: the
+      [waiver_report CLI](../scripts/waiver_report.py), a new `streamers` snapshot table
+      ([snapshot.py](../src/analysis/snapshot.py)), and a prominent section atop the dashboard's
+      **Waivers & Stash** tab ([apps/season_app.py](../apps/season_app.py)).
+- [x] Tests: [tests/test_streaming.py](../tests/test_streaming.py) (7 offline — DST attribution to the
+      offense faced, soft/tough multipliers, unseen-offense flat default, SOS merge, streamer ordering
+      + gain + verdict, empty-position handling). Full suite **113 passed**; `ruff` clean project-wide
+      (also cleared two long-standing unused imports in `waivers/inputs.py`).
+- [x] **Validated live** (2025 Week 10): DEF-SOS produces real playoff-matchup spread (BUF 20.2 / NYJ
+      19.5 soft vs CLE 10.2 tough over Weeks 15-17); this-week ranking + Δ-vs-current + the `streamers`
+      table serialize correctly (checked against a scratch DB; committed `season.db` untouched).

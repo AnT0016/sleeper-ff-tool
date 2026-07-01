@@ -36,6 +36,7 @@ from optimizer.inputs import (
     score_projections,
 )
 from optimizer.lineup import LineupPlayer, lineup_slots, optimize
+from scoring.engine import points
 from sleeper import client
 from waivers.handcuffs import find_handcuffs
 from waivers.league import (
@@ -44,11 +45,20 @@ from waivers.league import (
     my_standing,
     my_waiver_position,
     priority_scarcity,
-    rostered_player_ids,
 )
 from waivers.priority import SpendCandidate
-from waivers.sos import SOS_POSITIONS, normalize_team, opponents_by_week, points_allowed_by_position, sos_multipliers
+from waivers.sos import (
+    def_sos_multipliers,
+    merge_sos,
+    multiplier,
+    normalize_team,
+    opponents_by_week,
+    points_allowed_by_position,
+    points_allowed_to_def,
+    sos_multipliers,
+)
 from waivers.stash import PLAYOFF_WEEKS
+from waivers.streaming import STREAM_POSITIONS
 from waivers.usage import usage_signals
 
 _LOG = logging.getLogger(__name__)
@@ -59,6 +69,50 @@ _SKILL = ("QB", "RB", "WR", "TE")
 _SPEND_POOL_PER_POS = {"QB": 6, "RB": 8, "WR": 8, "TE": 6, "K": 3, "DEF": 3}
 #: How many top stash candidates to enrich with usage signals.
 _USAGE_TOP = 40
+#: Games in a fantasy season, for the streaming rest-of-season per-game level (season proj ÷ games).
+_SEASON_GAMES = 17
+
+
+def _stream_candidates(
+    scored: Mapping[str, Mapping],
+    next_scored: Mapping[str, Mapping],
+    season_scored: Mapping[str, Mapping],
+    fa_ids: set,
+    players_map: Mapping[str, Mapping],
+    sos: Mapping[str, Mapping[str, float]],
+    opp_by_week: Mapping[str, Mapping[int, str]],
+) -> list[dict]:
+    """Free-agent K/DEF with their streaming horizon values (this week / next / ROS / playoffs)."""
+    out: list[dict] = []
+    for pid, row in scored.items():
+        pos = row.get("pos")
+        if pid not in fa_ids or pos not in STREAM_POSITIONS:
+            continue
+        team = pid if pos == "DEF" else (players_map.get(pid, {}).get("team") or row.get("team"))
+        this_week = float(row.get("proj") or 0.0)
+        next_week = float((next_scored.get(pid) or {}).get("proj") or 0.0)
+        season_proj = float((season_scored.get(pid) or {}).get("proj") or 0.0)
+        ros_pg = season_proj / _SEASON_GAMES if season_proj else this_week
+        sched = opp_by_week.get(team or "", {})
+        playoff = 0.0
+        for w in PLAYOFF_WEEKS:
+            opp = sched.get(int(w))
+            if not opp:  # bye or unknown in a playoff week -> no game to tilt
+                continue
+            playoff += ros_pg * (multiplier(sos, opp, "DEF") if pos == "DEF" else 1.0)
+        out.append(
+            {
+                "player_id": pid,
+                "name": row.get("name") or pid,
+                "pos": pos,
+                "team": team,
+                "this_week": round(this_week, 2),
+                "next_week": round(next_week, 2),
+                "ros_pg": round(ros_pg, 2),
+                "playoff": round(playoff, 2),
+            }
+        )
+    return out
 
 
 @dataclass
@@ -85,6 +139,8 @@ class WaiverInputs:
     bye_week_of_team: Mapping[str, int]
     usage: Mapping[str, object]
     unjoined: list = field(default_factory=list)
+    stream_candidates: list[dict] = field(default_factory=list)  # FA K/DEF with horizon values
+    stream_current: dict = field(default_factory=dict)  # pos -> my current starter {name, this_week}
 
 
 def _name(meta: Mapping, pid: str) -> str:
@@ -208,7 +264,7 @@ def load_waiver_inputs(
         if pid in fa_ids and float(row.get("proj") or 0.0) > 0.0
     ]
 
-    # Self-computed playoff SOS (season-to-date actuals re-scored in our settings) + schedule lookups.
+    # Self-computed SOS (season-to-date actuals re-scored in our settings) + schedule lookups.
     actuals = nflverse.load_weekly_actuals(season)
     reg = actuals.filter((actuals["season_type"] == "REG") & (actuals["week"] < week))
     pa = points_allowed_by_position(reg.iter_rows(named=True), scoring)
@@ -216,7 +272,32 @@ def load_waiver_inputs(
 
     schedule_rows = list(nflverse.load_schedules(season).iter_rows(named=True))
     opp_by_week = opponents_by_week(schedule_rows, PLAYOFF_WEEKS)
+    all_opp = opponents_by_week(schedule_rows, range(1, max(PLAYOFF_WEEKS) + 1))
     bye_week_of_team = _bye_week_by_team(schedule_rows)
+
+    # DEF strength-of-schedule: re-score each prior week's DST lines and attribute to the offense
+    # faced -> how generous each offense is to defenses (the matchup to stream a D into). Merged into
+    # `sos` under a "DEF" key alongside the skill-position multipliers.
+    dst_rows: list[dict] = []
+    for w in range(1, week):
+        for r in sleeper.get_stats(season, w, positions=("DEF",)):
+            dst_rows.append(
+                {"team": str(r.get("player_id")), "week": w, "points": points(r.get("stats") or {}, scoring)}
+            )
+    sos = merge_sos(sos, def_sos_multipliers(points_allowed_to_def(dst_rows, all_opp)))
+
+    # K/DEF streaming horizons: this week + next week (real weekly projections), a rest-of-season
+    # per-game level (season projection ÷ games), and a Weeks 15-17 outlook (DEF SOS-tilted, K flat).
+    next_scored = score_projections(sleeper.get_projections(season, week + 1), scoring)
+    season_scored = score_projections(sleeper.get_season_projections(season), scoring)
+    stream_candidates = _stream_candidates(
+        scored, next_scored, season_scored, fa_ids, players_map, sos, opp_by_week
+    )
+    stream_current = {
+        sp.pos: {"name": sp.name, "this_week": sp.proj_pts}
+        for sp in my_starters
+        if sp.pos in STREAM_POSITIONS
+    }
 
     # Usage enrichment for the candidate set (best effort).
     usage: dict[str, object] = {}
@@ -266,4 +347,6 @@ def load_waiver_inputs(
         opponents_by_week=opp_by_week,
         bye_week_of_team=bye_week_of_team,
         usage=usage,
+        stream_candidates=stream_candidates,
+        stream_current=stream_current,
     )

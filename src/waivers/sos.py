@@ -106,6 +106,54 @@ def multiplier(
     return float((sos.get(normalize_team(defense)) or {}).get(pos, 1.0))
 
 
+def points_allowed_to_def(
+    dst_rows: Iterable[Mapping],
+    opponents_by_week: Mapping[str, Mapping[int, str]],
+) -> dict[str, float]:
+    """``offense_team -> DST fantasy points it gives up per game`` (in our scoring).
+
+    ``dst_rows`` are per-team-week dicts with ``team`` (the *defense* that scored), ``week`` and
+    ``points`` (that DST's already-re-scored fantasy points). Each is attributed to the **offense**
+    that defense faced (looked up from ``opponents_by_week``): a high value means that offense is
+    generous to opposing defenses — the matchup you want to *stream a defense into*. This is the DEF
+    analogue of :func:`points_allowed_by_position`, which only covers offensive positions.
+    """
+    totals: dict[str, float] = defaultdict(float)
+    games: dict[str, set] = defaultdict(set)
+    for row in dst_rows:
+        team = normalize_team(row.get("team"))
+        wk = row.get("week")
+        if not team or wk is None:
+            continue
+        offense = (opponents_by_week.get(team) or {}).get(int(wk))
+        if not offense:
+            continue
+        totals[offense] += float(row.get("points") or 0.0)
+        games[offense].add(int(wk))
+    return {o: round(totals[o] / (len(games[o]) or 1), 2) for o in totals}
+
+
+def def_sos_multipliers(pa_to_def: Mapping[str, float]) -> dict[str, dict[str, float]]:
+    """``offense_team -> {"DEF": multiplier}`` (1.0 = league-average generosity to defenses).
+
+    Shaped like :func:`sos_multipliers` (nested under the ``"DEF"`` key) so it merges into the same
+    ``sos`` map the rest of the code reads via :func:`multiplier`. ``> 1`` is a soft matchup for a
+    streamed defense (the offense gives up more DST points than average).
+    """
+    vals = [v for v in pa_to_def.values() if v]
+    avg = sum(vals) / len(vals) if vals else 0.0
+    return {o: {"DEF": round(v / avg, 3) if avg else 1.0} for o, v in pa_to_def.items()}
+
+
+def merge_sos(*maps: Mapping[str, Mapping[str, float]]) -> dict[str, dict[str, float]]:
+    """Merge several ``team -> {pos -> multiplier}`` maps into one (per-position keys combined)."""
+    out: dict[str, dict[str, float]] = defaultdict(dict)
+    for m in maps:
+        for team, by_pos in m.items():
+            out[team].update(by_pos)
+    return dict(out)
+
+
 def opponents_by_week(
     schedule_rows: Iterable[Mapping], weeks: Iterable[int]
 ) -> dict[str, dict[int, str]]:

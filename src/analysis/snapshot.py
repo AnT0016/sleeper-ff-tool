@@ -41,6 +41,7 @@ from sleeper import client
 from waivers.inputs import load_waiver_inputs
 from waivers.priority import spend_advice
 from waivers.stash import bye_stash_suggestions, rank_playoff_stashes
+from waivers.streaming import rank_streamers
 
 _LOG = logging.getLogger(__name__)
 
@@ -295,6 +296,23 @@ def build_snapshot(
             w.my_starters, w.bye_week_of_team, w.stash_candidates, from_week=week + 1
         )
     ]
+    streamer_rows = [
+        {
+            "pos": adv.pos,
+            "verdict": adv.verdict,
+            "current_name": adv.current_name or "",
+            "current_this_week": adv.current_this_week,
+            "name": o.name,
+            "team": o.team or "",
+            "this_week": o.this_week,
+            "gain": o.gain,
+            "next_week": o.next_week,
+            "ros_pg": o.ros_pg,
+            "playoff": o.playoff,
+        }
+        for adv in rank_streamers(w.stream_candidates, w.stream_current)
+        for o in adv.options
+    ]
 
     # --- Phase 5: team analysis (season-long + this-week) --------------------------------------
     rosters = sleeper.get_rosters(league_id)
@@ -368,6 +386,7 @@ def build_snapshot(
         "spend": pd.DataFrame(spend_rows),
         "stashes": pd.DataFrame(stash_rows),
         "bye_stash": pd.DataFrame(bye_stash_rows),
+        "streamers": pd.DataFrame(streamer_rows),
         "team_strength_season": pd.DataFrame(_strength_long(season_pts, names, my_rid)),
         "team_strength_week": pd.DataFrame(_strength_long(week_pts, names, my_rid)),
         "position_strength_season": pd.DataFrame(_strength_rows(season_strengths)),

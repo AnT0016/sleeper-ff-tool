@@ -226,6 +226,33 @@ with tab_week:
 with tab_waiver:
     st.caption(meta.get("posture_note", ""))
 
+    st.subheader("🎯 Weekly K/DEF streaming — best available this week")
+    st.caption(
+        "Ranked by THIS week's projection in our scoring. Δ = edge over your current starter. "
+        "The next / ROS·g / playoff columns show the run ahead — the DEF *playoff* column is tilted by "
+        "our DEF strength-of-schedule; K carries no SOS (a kicker's output rides its own offense)."
+    )
+    streamers = load_table("streamers", mt)
+    if streamers.empty:
+        st.caption("No K/DEF free agents projected this week.")
+    else:
+        for pos in ("DEF", "K"):
+            grp = streamers[streamers["pos"] == pos]
+            if grp.empty:
+                continue
+            verdict = str(grp["verdict"].iloc[0])
+            cur = str(grp["current_name"].iloc[0]) or "none rostered"
+            cur_tw = float(grp["current_this_week"].iloc[0])
+            badge = "✅ STREAM" if verdict == "stream" else "⚪ hold"
+            st.markdown(f"**{pos}** — {badge} · current starter: {cur} ({cur_tw:.1f} proj)")
+            view = grp.rename(columns={
+                "name": "player", "this_week": "this wk", "next_week": "next wk",
+                "ros_pg": "ROS·g", "playoff": "playoff",
+            })
+            show(view[["player", "team", "this wk", "gain", "next wk", "ROS·g", "playoff"]])
+
+    st.divider()
+
     st.subheader("Handcuff / injury-replacement alerts")
     hc = load_table("handcuffs", mt)
     if hc.empty:

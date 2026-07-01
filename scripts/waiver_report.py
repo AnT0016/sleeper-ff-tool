@@ -27,6 +27,7 @@ from sleeper.config import LEAGUE_ID, MY_USER_ID
 from waivers.inputs import load_waiver_inputs
 from waivers.priority import spend_advice
 from waivers.stash import bye_stash_suggestions, rank_playoff_stashes
+from waivers.streaming import rank_streamers
 
 
 def _default_season() -> int:
@@ -83,6 +84,21 @@ def main() -> None:
             f"Δlineup {a.lineup_gain:+5.2f}  contention {cont}{_usage(inp, a.player_id)}"
         )
         print(f"            {a.reason}")
+
+    # 2b) Weekly K/DEF streaming guide ----------------------------------------------------------
+    streamers = rank_streamers(inp.stream_candidates, inp.stream_current)
+    print("\n--- Weekly K/DEF streaming guide (best available this week, in our scoring) ---")
+    for adv in streamers:
+        cur = f"{adv.current_name} {adv.current_this_week:.1f}" if adv.current_name else "(none rostered)"
+        tag = "STREAM" if adv.verdict == "stream" else " hold "
+        print(f"  [{tag}] {adv.pos}  — current starter: {cur}")
+        for o in adv.options:
+            print(
+                f"          {o.name:<22} {o.team or '':<4} this {o.this_week:5.1f} (Δ{o.gain:+.1f})   "
+                f"next {o.next_week:5.1f}   ROS/g {o.ros_pg:4.1f}   playoff {o.playoff:5.1f}"
+            )
+    print("  (Δ = this-week edge over your current starter. K carries no SOS — kicker output is "
+          "driven by its own offense, not the opponent.)")
 
     # 3) Playoff (Weeks 15-17) stash ranker -----------------------------------------------------
     stashes = rank_playoff_stashes(inp.stash_candidates, inp.sos, inp.opponents_by_week)
