@@ -358,3 +358,60 @@ Prep so the new 2026 league is a config change, not a code change. See
 - [x] Validated: `season.db` rebuilt (2025 W10) with `player_id`/`kickoff` populated (kickoffs internally
       consistent — Achane MIA `vs BUF` ↔ DJ Moore BUF `@ MIA`); dashboard verified headless via `AppTest`
       (card view renders, no exceptions). Full suite **86 passed**; `ruff` clean on changed files.
+
+## Phase 7 — (Optional) Full-season championship Monte Carlo `[x]` DONE
+New package [src/seasonsim/](../src/seasonsim/) — where Phase 6 asks *"which build drafts the best
+distribution of season points?"*, this asks the payoff question: **given the twelve rosters as they
+stand, how often does MY team actually win the title?** Turns "draft capital" into a championship
+probability. Same discipline as Phase 6: directional, every assumption printed, read-only, reuses the
+Phase 1/2 board.
+- [x] **One simulated season** ([engine.py](../src/seasonsim/engine.py)): draw every rostered player's
+      **weekly** points + injury out-weeks, set each of the 12 teams' lineups each week, resolve the
+      real head-to-head schedule → records, seed the top-6, and play the locked Weeks 15-17 bracket to a
+      champion. Aggregated over thousands of seasons → per-team P(title) / P(playoffs) / expected wins,
+      and my full seed / wins / points distribution.
+- [x] **Weekly outcome + injury model** ([distributions.py](../src/seasonsim/distributions.py)): weeks
+      are **independent lognormal** draws whose *sum* reproduces each player's custom-scored season
+      projection (weekly CV = season CV × √17 — single games are far noisier than a full season). Reuses
+      Phase 6's per-position CV + injury knobs; a setback now **zeroes a contiguous run of weeks**
+      (so the bench is actually tested). Stated v1 limits: no within-season hot/cold correlation
+      (independence understates whole-season swings), and **byes not modeled** (season spread evenly —
+      uniform across teams).
+- [x] **Vectorised lineup valuation** ([lineup.py](../src/seasonsim/lineup.py)): all sims at once via
+      `numpy` sorts. Generalises Phase 6's greedy fill to **select-by-X, score-by-Y** — with `select ==
+      value` it's the hindsight-optimal ceiling; with `select` = projected means it's the lineup a
+      manager would actually set, scored on what really happened (verified equal to the Phase 6 scalar
+      optimizer in tests). That split is how the sim separates roster quality from start/sit skill.
+- [x] **Schedule + bracket** ([schedule.py](../src/seasonsim/schedule.py)): the **real** per-week
+      pairings from Sleeper matchups when they exist, else a circle-method round-robin; the locked
+      6-team bracket (top-2 bye; 3v6 & 4v5; teams stay on their side; ties → higher seed).
+- [x] **Two skill regimes (CRN)** — reported side by side so lever #2's value is *measured*, not
+      assumed: `equal_skill` (every manager equally sloppy: lineup selection ± N(0, 0.5×mean) noise) vs
+      `my_edge` (I play clean, noise 0, while rivals keep theirs). Both share the same weekly/injury
+      draws; the **Δ is the weekly optimizer's worth**.
+- [x] **Live glue** ([inputs.py](../src/seasonsim/inputs.py)) + **CLI**
+      ([scripts/season_sim.py](../scripts/season_sim.py)): `python scripts/season_sim.py [--league ID
+      --season Y --sims N --opp-noise f]`. Each rostered player gets its custom-scored projection (0 mean
+      for un-projected waiver depth, position kept so it still slots); playoff format read from league
+      settings. For a **completed** season the league board prints the sim's odds next to the **actual**
+      final standings + champion (★) — the calibration harness.
+- [x] Tests: [tests/test_seasonsim.py](../tests/test_seasonsim.py) (14 offline — weekly mean-preservation,
+      bounded/contiguous injuries, lineup matches the scalar optimizer + honours select-vs-value,
+      round-robin completeness, bracket top-seed/upset/tie, record tally, and an end-to-end tiny league:
+      champ probs sum to 1, seed-reproducible, a stacked roster wins most, the start/sit edge never hurts
+      the sharp manager). Full suite **106 passed**; `ruff` clean.
+- [x] **Calibrated on real seasons** (rosters = end-of-season snapshot, means = that year's preseason
+      projections — an honest ex-ante lens on "how good is this collection of players"):
+      - **2025:** my team (actual regular-season **#1**) → 2nd-highest title odds (15.7%); the *actual*
+        champion was a #5-seed the model rated a **3.8% longshot** — i.e. the sim correctly says the best
+        rosters were elsewhere and the winner got hot in a 3-week single-elimination coin-flip. Neither
+        near 0% (well-calibrated: possible, not predicted).
+      - **2024:** actual champion was the #1 seed (10.2%, mid-pack in the model); my weak end-of-season
+        roster that year → 0.2%, finished #9. Consistent.
+      - **Start/sit edge (2025):** championship **9.6% → 15.7% (Δ +6.1 pts)**, playoffs **59.6% → 71.5%
+        (Δ +11.9 pts)** — a concrete, if `opp_noise`-dependent, dollar value for tightening the in-season
+        levers (Plan B). Title odds are compressed (best ~17%), which is *correct*: a 12-team league with
+        a 3-week single-elimination playoff genuinely caps any one team's title probability low.
+- **Limitations (stated):** no in-season trades/waivers (rosters fixed → **understates** the streaming/bye
+  edge, so odds are a floor); no byes; independent weeks; the `opp_noise` skill gap is a heuristic knob,
+  not fitted. Directional — a single real season is one draw from this distribution.
