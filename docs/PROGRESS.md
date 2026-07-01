@@ -242,10 +242,13 @@ value-add (custom re-scoring, on top of ADP) is the +524, not merely "I drafted 
 and ADP are **ex-ante** strategies graded on **real results** — a clean apples-to-apples baseline.
 A projection-vs-actual check (2025) found top-60 rank agreement of **64%**, consistent with genuine
 *preseason* projections (a hindsight-leaked feed would be ~90%+), so the edge isn't a leakage artifact.
-**Caveats that remain:** grades draft-capital points (not lineup wins); one league whose non-standard
-scoring (4-pt pass TD, distance-based K, rich DST) makes re-scoring matter more than in a vanilla
-league; and it's still retrospective. The Backtest tab's Draft-replay now shows the ADP column + a
-"VOR edge over ADP" metric.
+**Caveats that remain:** grades draft-capital points (not lineup wins); a single league (small,
+correlated n); and it's still retrospective. Note this is a **standard half-PPR** league (4-pt passing
+TD is the industry default — ESPN/Yahoo/NFL — not exotic; the "⚠ non-standard" flags elsewhere are
+only relative to Sleeper's precomputed `pts_half_ppr` shortcut, an engine-validation caution). So the
+VOR-over-ADP edge is genuine value-based-drafting skill (scarcity, waiting on QB), not a scoring
+artifact — it should generalize rather than being league-specific. The Backtest tab's Draft-replay now
+shows the ADP column + a "VOR edge over ADP" metric.
 
 **Toward a real forward test:** froze the **2026 preseason projections**
 ([scripts/freeze_projections.py](../scripts/freeze_projections.py) →
