@@ -52,11 +52,17 @@ def load_users(league_id: str) -> dict[str, str]:
 
 
 @st.cache_data(ttl=900, show_spinner="Re-scoring season projections in our league settings…")
-def load_scored_board(season: int, league_id: str) -> list:
-    """Custom-scored projection board (VOR/tiers added per-run). Scoring is pulled from the draft's
-    own league, so the board always reflects the right league's settings."""
+def load_vor_board(season: int, league_id: str, base_starters: tuple, flex_total: int) -> list:
+    """Fully-prepared board (custom-scored + VOR + tiers, sorted by VOR), cached so it isn't rebuilt
+    on every rerun. Scoring is pulled from the draft's own league. ``base_starters`` is passed as a
+    sorted tuple of ``(pos, count)`` so the args stay hashable for the cache."""
     scoring = client.get_league(league_id)["scoring_settings"]
-    return build_board(season, scoring)
+    board = build_board(season, scoring)
+    replacement = replacement_levels(board, dict(base_starters), flex_slots=flex_total)
+    add_vor(board, replacement)
+    tierize(board, by="vor")
+    board.sort(key=lambda p: p.vor, reverse=True)
+    return board
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -88,8 +94,8 @@ def fmt_player(pick: dict) -> str:
 
 # --------------------------------------------------------------------------- sidebar / inputs
 st.sidebar.header("Draft")
-league_id = st.sidebar.text_input("League ID", value=LEAGUE_ID, help="Used to discover the draft.")
-draft_id = st.sidebar.text_input("Draft ID", value="", help="Paste the draft_id, or pick one below.")
+league_id = st.sidebar.text_input("League ID", value=LEAGUE_ID, help="Used to discover the draft.").strip()
+draft_id = st.sidebar.text_input("Draft ID", value="", help="Paste the draft_id, or pick one below.").strip()
 
 if not draft_id:
     found = discover_drafts(league_id)
@@ -101,7 +107,7 @@ if not draft_id:
         st.sidebar.warning("No draft found for this league yet. Paste a Draft ID.")
         st.stop()
 
-my_user_id = st.sidebar.text_input("My user ID", value=MY_USER_ID)
+my_user_id = st.sidebar.text_input("My user ID", value=MY_USER_ID).strip()
 
 try:
     default_season = int(client.get_state().get("season") or 2025)
@@ -111,7 +117,7 @@ season = st.sidebar.number_input("Projection season", min_value=2020, max_value=
 
 st.sidebar.header("Live")
 auto = st.sidebar.toggle("Auto-refresh", value=True)
-interval = st.sidebar.number_input("Poll interval (s)", min_value=2, max_value=30, value=3)
+interval = st.sidebar.number_input("Poll interval (s)", min_value=1, max_value=30, value=2)
 cushion = st.sidebar.slider("Survival cushion (picks)", 2, 18, 6, help="ADP margin for 🟢/🟡/🔴.")
 run_window = st.sidebar.slider("Run window (picks)", 4, 24, 12, help="Window for positional-run counts.")
 top_n = st.sidebar.slider("Board rows", 15, 100, 40)
@@ -126,13 +132,12 @@ cfg = roster.roster_config(settings)
 scoring_league_id = draft.get("league_id") or league_id
 users = load_users(scoring_league_id)
 
-board = load_scored_board(int(season), scoring_league_id)
-replacement = replacement_levels(
-    board, roster.base_starters(cfg), flex_slots=roster.flex_slots_total(cfg)
+board = load_vor_board(
+    int(season),
+    scoring_league_id,
+    tuple(sorted(roster.base_starters(cfg).items())),
+    roster.flex_slots_total(cfg),
 )
-add_vor(board, replacement)
-tierize(board, by="vor")
-board.sort(key=lambda p: p.vor, reverse=True)
 
 draft_order = draft.get("draft_order") or {}
 my_slot = int(draft_order[my_user_id]) if my_user_id in draft_order else None
@@ -185,7 +190,7 @@ def live_panel() -> None:
     if fresh and last_seen:
         st.success("🆕 " + " · ".join(f"#{p['pick_no']} {fmt_player(p)}" for p in fresh[-5:]))
 
-    left, right = st.columns([3, 2], gap="large")
+    left, right = st.columns([5, 2], gap="large")
 
     # ----- best available board
     with left:
@@ -193,24 +198,43 @@ def live_panel() -> None:
         all_pos = ["QB", "RB", "WR", "TE", "K", "DEF"]
         sel = st.multiselect("Positions", all_pos, default=all_pos, key="posfilter")
         avail = [p for p in board if p.player_id not in drafted and p.pos in sel]
+        surv_col = f"@#{next_pick}" if next_pick else None
         rows = []
         for p in avail[:top_n]:
             row = {
                 "Need": "🎯" if p.pos in needs else "",
-                "Tier": f"{p.pos}{p.tier}",
+                "Tier": f"{p.pos}{p.tier}",  # already encodes position, so we drop a separate Pos column
                 "Player": p.name,
-                "Pos": p.pos,
                 "Tm": p.team or "",
                 "Proj": round(p.proj_pts, 1),
                 "VOR": round(p.vor, 1),
                 # keep the column homogeneously string -- mixing float + "—" breaks Arrow serialization
                 "ADP": "—" if p.adp == float("inf") else f"{p.adp:.1f}",
             }
-            if next_pick:
-                row[f"@#{next_pick}"] = _SURVIVAL_BADGE[snake.survival(p.adp, next_pick, cushion=cushion)]
+            if surv_col:
+                row[surv_col] = _SURVIVAL_BADGE[snake.survival(p.adp, next_pick, cushion=cushion)]
             rows.append(row)
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=560)
-        st.caption("🎯 = fills an open roster need · K/DEF: stream weekly, don't reach early.")
+
+        # Explicit compact widths so ADP + the survival dots always fit (no horizontal scroll).
+        col_cfg = {
+            "Need": st.column_config.TextColumn("🎯", width="small"),
+            "Tier": st.column_config.TextColumn("Tier", width="small"),
+            "Player": st.column_config.TextColumn("Player", width="medium"),
+            "Tm": st.column_config.TextColumn("Tm", width="small"),
+            "Proj": st.column_config.NumberColumn("Proj", width="small", format="%.1f"),
+            "VOR": st.column_config.NumberColumn("VOR", width="small", format="%.1f"),
+            "ADP": st.column_config.TextColumn("ADP", width="small", help="Market half-PPR ADP."),
+        }
+        if surv_col:
+            col_cfg[surv_col] = st.column_config.TextColumn(
+                surv_col, width="small",
+                help="Survives to your next pick — 🟢 likely · 🟡 toss-up · 🔴 likely gone.",
+            )
+        st.dataframe(
+            pd.DataFrame(rows), hide_index=True, width="stretch", height=620, column_config=col_cfg
+        )
+        st.caption("🎯 = open roster need · 🟢/🟡/🔴 = survives to your next pick · "
+                   "K/DEF: stream weekly, don't reach early.")
 
     with right:
         # ----- roster needs
