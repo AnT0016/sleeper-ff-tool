@@ -25,6 +25,7 @@ import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from draft import roster, snake  # noqa: E402
+from draft.grade import grade_draft, positional_ranks  # noqa: E402
 from draft.vor import add_vor, replacement_levels, tierize  # noqa: E402
 from projections.board import build_board  # noqa: E402
 from sleeper import client  # noqa: E402
@@ -138,6 +139,8 @@ board = load_vor_board(
     tuple(sorted(roster.base_starters(cfg).items())),
     roster.flex_slots_total(cfg),
 )
+# VOR rank (1 = best) for the "Val" steals/reaches column: how a player's value rank compares to ADP.
+vor_rank = {p.player_id: i + 1 for i, p in enumerate(board)}
 
 draft_order = draft.get("draft_order") or {}
 my_slot = int(draft_order[my_user_id]) if my_user_id in draft_order else None
@@ -210,6 +213,8 @@ def live_panel() -> None:
                 "VOR": round(p.vor, 1),
                 # keep the column homogeneously string -- mixing float + "—" breaks Arrow serialization
                 "ADP": "—" if p.adp == float("inf") else f"{p.adp:.1f}",
+                "Val": ("—" if p.adp == float("inf")
+                        else f"{int(round(p.adp - vor_rank.get(p.player_id, 0))):+d}"),
             }
             if surv_col:
                 row[surv_col] = _SURVIVAL_BADGE[snake.survival(p.adp, next_pick, cushion=cushion)]
@@ -224,6 +229,11 @@ def live_panel() -> None:
             "Proj": st.column_config.NumberColumn("Proj", width="small", format="%.1f"),
             "VOR": st.column_config.NumberColumn("VOR", width="small", format="%.1f"),
             "ADP": st.column_config.TextColumn("ADP", width="small", help="Market half-PPR ADP."),
+            "Val": st.column_config.TextColumn(
+                "Val", width="small",
+                help="ADP − VOR rank. +ve = the market lets them slide past their value (a steal); "
+                     "−ve = a reach vs the field.",
+            ),
         }
         if surv_col:
             col_cfg[surv_col] = st.column_config.TextColumn(
@@ -233,8 +243,8 @@ def live_panel() -> None:
         st.dataframe(
             pd.DataFrame(rows), hide_index=True, width="stretch", height=620, column_config=col_cfg
         )
-        st.caption("🎯 = open roster need · 🟢/🟡/🔴 = survives to your next pick · "
-                   "K/DEF: stream weekly, don't reach early.")
+        st.caption("🎯 = open roster need · Val +ve = a value the ADP field lets slide · "
+                   "🟢/🟡/🔴 = survives to your next pick · K/DEF: stream weekly, don't reach early.")
 
     with right:
         # ----- roster needs
@@ -270,6 +280,36 @@ def live_panel() -> None:
                 st.markdown(f"**#{pk}** (R{slot_of_pick(pk, cfg.teams)[0]}): {names}")
         elif not my_slot:
             st.info("Slot not revealed yet — snake picks & survival flags unlock once `draft_order` populates.")
+
+    # ----- draft grades (all teams, our scoring)
+    if picks_made:
+        complete = picks_made >= cfg.teams * cfg.rounds
+        st.subheader("🏆 Draft grades — projected starters in our scoring"
+                     + ("" if complete else " (so far)"))
+        grades = grade_draft(
+            picks, board, cfg.slots, teams=cfg.teams, my_slot=my_slot, slot_names=names_by_slot
+        )
+        gdf = pd.DataFrame(
+            [
+                {
+                    "Rank": g.rank,
+                    "Team": ("⭐ " if g.is_me else "") + g.team,
+                    "Grade": g.grade,
+                    "Proj": g.starters_pts,
+                    **{pos: g.by_pos.get(pos, 0.0) for pos in ("QB", "RB", "WR", "TE", "K", "DEF")},
+                }
+                for g in grades
+            ]
+        )
+        st.dataframe(gdf, hide_index=True, width="stretch")
+        if my_slot:
+            pr = positional_ranks(grades, my_slot)
+            tail = "draft complete" if complete else "projected — updates as picks come in"
+            st.caption(
+                "Your positional ranks: "
+                + " · ".join(f"{pos} #{r}/{n}" for pos, (r, n) in pr.items())
+                + f"  ·  {tail}"
+            )
 
     # ----- recent picks log
     st.subheader("Recent picks")

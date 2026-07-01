@@ -9,6 +9,7 @@ completed draft (see docs/PROGRESS.md).
 from __future__ import annotations
 
 from draft import roster, snake
+from draft.grade import grade_draft, positional_ranks, team_picks
 from draft.vor import add_vor, replacement_levels, tierize
 from projections.board import PlayerRow
 
@@ -129,3 +130,34 @@ def test_positional_runs_window():
     positions = ["RB", "RB", "WR", "RB", "WR", "WR"]
     runs = roster.positional_runs(positions, window=3)  # last 3: RB, WR, WR
     assert runs["WR"] == 2 and runs["RB"] == 1
+
+
+# --------------------------------------------------------------------------- draft grades
+def test_team_picks_groups_by_slot_in_pick_order():
+    picks = [
+        {"pick_no": 1, "draft_slot": 1, "player_id": "a"},
+        {"pick_no": 2, "draft_slot": 2, "player_id": "b"},
+        {"pick_no": 3, "draft_slot": 2, "player_id": "c"},
+    ]
+    tp = team_picks(picks)
+    assert tp[1] == ["a"] and tp[2] == ["b", "c"]
+
+
+def test_grade_draft_ranks_grades_and_positional():
+    # 2-team league, 1 QB + 1 RB starter each.
+    slots = {"QB": 1, "RB": 1, "WR": 0, "TE": 0, "FLEX": 0, "K": 0, "DEF": 0}
+    board = [_row("q1", "QB", 300), _row("q2", "QB", 100), _row("r1", "RB", 200), _row("r2", "RB", 50)]
+    picks = [
+        {"pick_no": 1, "draft_slot": 1, "player_id": "q1", "metadata": {"position": "QB"}},
+        {"pick_no": 2, "draft_slot": 2, "player_id": "q2", "metadata": {"position": "QB"}},
+        {"pick_no": 3, "draft_slot": 2, "player_id": "r1", "metadata": {"position": "RB"}},
+        {"pick_no": 4, "draft_slot": 1, "player_id": "r2", "metadata": {"position": "RB"}},
+    ]
+    grades = grade_draft(picks, board, slots, teams=2, my_slot=1)
+    g1 = next(g for g in grades if g.slot == 1)
+    g2 = next(g for g in grades if g.slot == 2)
+    assert g1.starters_pts == 350.0 and g2.starters_pts == 300.0  # 300+50 vs 100+200
+    assert g1.rank == 1 and g1.is_me and g1.grade == "A"
+    # positional: my QB is best (1/2), my RB is worst (2/2)
+    pr = positional_ranks(grades, my_slot=1)
+    assert pr["QB"] == (1, 2) and pr["RB"] == (2, 2)

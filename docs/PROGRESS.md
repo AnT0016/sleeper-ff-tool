@@ -291,6 +291,14 @@ Prep so the new 2026 league is a config change, not a code change. See
       points — kickoff time is **display-only**, for manual FLEX hedging at lock time.
 - [x] **Setup checklist:** [docs/2026_SETUP.md](2026_SETUP.md) — config (new `LEAGUE_ID`), mock-draft
       rehearsal, prep→draft→in-season→retrospective run order, refresh cron, quick-reference table.
+- [x] **Live tracker enhancements** ([apps/draft_app.py](../apps/draft_app.py)): input-strip hardening
+      (a trailing space 404'd the API), faster polling (2s default / 1s min), a cached VOR board,
+      and a wider best-available table with ADP + survival dots always visible. Plus two draft-day
+      features: a **"Val" (steals & reaches)** column = `ADP − VOR rank` (+ve = a value the ADP field
+      lets slide, −ve = a reach), and a **"🏆 Draft grades"** panel ([src/draft/grade.py](../src/draft/grade.py),
+      pure + unit-tested) ranking all 12 teams' best-lineup projection **in our scoring** (A–F +
+      per-position ranks, mine highlighted) — quantifying the custom-VOR edge over the ADP bots.
+      Headless-verified against the 2025 completed draft.
 - [x] **Off-season-safe weekly cron** (`snapshot.offseason_skip_reason` + `scripts/refresh_data.py`):
       a *scheduled* refresh now **no-ops with exit 0** (green, no commit) when Sleeper isn't in a regular
       season — previously it auto-detected the rolled-over 2026 season and crashed on the nflverse
