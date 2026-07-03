@@ -8,11 +8,13 @@ simulators stay consistent.
 
 ASSUMPTIONS (heuristic, *not* fitted — printed in the report so they can be judged):
 
-* **Weeks are independent** lognormal draws whose *sum* reproduces the player's season projection and
-  season CV. If a week has mean ``m/W`` and the season (sum of ``W`` weeks) should have CV ``c``, then
-  each week needs ``CV_week = c * sqrt(W)`` — single-game fantasy is much noisier than a full season
-  (a WR who averages a WR2 line still has 2-point and 30-point weeks). Independence means we model no
-  within-season hot/cold streak (a real effect that would *widen* season swings) — a stated v1 limit.
+* **A player's week = per-season factor × single-game draw.** The single-game draw is lognormal at
+  the shared per-position ``GAME_CV`` (the same realistic one-week noise the win-probability model
+  uses — head-to-head weeks are decided by THIS number, so it must not be inflated). The per-season
+  factor (drawn once per sim × player, mean 1) carries the rest of the season-level uncertainty —
+  role changes, breakouts, busts — sized so the season TOTAL still reproduces the position's season
+  CV. The old independence-derived ``season CV × √W`` weekly noise reproduced the season total too,
+  but made every single week ~2× too noisy, compressing records and title odds toward a coin flip.
 * **Injuries** are one *significant* multi-week setback per season (Bernoulli per position); if it
   fires, a contiguous ``Poisson(severity)``-week stretch starting at a uniformly-random week is zeroed
   out. That empties the player's lineup slot for those weeks — the durability risk a real bench covers.
@@ -28,7 +30,9 @@ import numpy as np
 # Reuse the draft simulator's per-position variance / durability knobs so the two stay in lockstep.
 from draftsim.distributions import (  # noqa: F401  (re-exported for the report)
     DEFAULT_CV,
+    DEFAULT_GAME_CV,
     DEFAULT_RISK,
+    GAME_CV,
     INJURY_RISK,
     POSITION_CV,
     SEASON_GAMES,
@@ -36,9 +40,16 @@ from draftsim.distributions import (  # noqa: F401  (re-exported for the report)
 )
 
 
-def weekly_cv(season_cv: np.ndarray, n_weeks: int) -> np.ndarray:
-    """Per-week CV whose ``n_weeks`` independent draws reproduce ``season_cv`` on the season total."""
-    return np.asarray(season_cv, dtype=float) * np.sqrt(float(n_weeks))
+def season_factor_cv(season_cv: np.ndarray, game_cv: np.ndarray, n_weeks: int) -> np.ndarray:
+    """CV of the per-season factor so that ``factor × Σ weekly`` has the season CV.
+
+    For independent lognormals, ``1 + CV_total² = (1 + CV_factor²) × (1 + CV_week² / W)`` — solve for
+    ``CV_factor`` and floor at 0 (if single-game noise alone already exceeds the season CV).
+    """
+    c = np.asarray(season_cv, dtype=float)
+    g = np.asarray(game_cv, dtype=float)
+    ratio = (1.0 + c * c) / (1.0 + g * g / float(n_weeks))
+    return np.sqrt(np.maximum(ratio - 1.0, 0.0))
 
 
 def sample_weekly_points(
@@ -47,20 +58,32 @@ def sample_weekly_points(
     season_cv: np.ndarray,
     n_sims: int,
     n_weeks: int,
+    *,
+    game_cv: np.ndarray | None = None,
 ) -> np.ndarray:
-    """``(n_sims, n_players, n_weeks)`` weekly points, independent lognormal, mean-preserving.
+    """``(n_sims, n_players, n_weeks)`` weekly points, mean-preserving.
 
-    Each week's mean is ``season_mean / n_weeks`` and each week's CV is ``season_cv * sqrt(n_weeks)``,
-    so summing the weeks recovers a season total with the intended mean and CV. A non-positive (or
-    missing) projection stays exactly zero every week rather than becoming lognormal noise.
+    Each week is an independent lognormal at the realistic single-game ``game_cv`` around
+    ``season_mean / n_weeks``, multiplied by a once-per-(sim, player) lognormal season factor
+    (mean 1) sized by :func:`season_factor_cv` — so single weeks stay realistically noisy while the
+    season total keeps the position's full season CV. A non-positive (or missing) projection stays
+    exactly zero every week rather than becoming lognormal noise.
     """
     season_mean = np.asarray(season_mean, dtype=float)
     season_cv = np.asarray(season_cv, dtype=float)
+    g = np.full(season_mean.shape, DEFAULT_GAME_CV) if game_cv is None else np.asarray(game_cv, dtype=float)
+
     wk_mean = season_mean / float(n_weeks)
-    wk_cv = weekly_cv(season_cv, n_weeks)
-    mu, sigma = lognormal_params(wk_mean, wk_cv)  # per-player (n_players,)
+    mu_w, sigma_w = lognormal_params(wk_mean, g)  # per-player (n_players,)
     z = rng.standard_normal((n_sims, season_mean.size, n_weeks))
-    pts = np.exp(mu[None, :, None] + sigma[None, :, None] * z)
+    pts = np.exp(mu_w[None, :, None] + sigma_w[None, :, None] * z)
+
+    f_cv = season_factor_cv(season_cv, g, n_weeks)
+    mu_f, sigma_f = lognormal_params(np.ones_like(f_cv), f_cv)  # mean-1 factor
+    zf = rng.standard_normal((n_sims, season_mean.size))
+    factor = np.exp(mu_f[None, :] + sigma_f[None, :] * zf)
+    pts *= factor[:, :, None]
+
     pts[:, season_mean <= 0.0, :] = 0.0
     return pts
 

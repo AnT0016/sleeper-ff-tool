@@ -23,17 +23,16 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from draftsim.distributions import sample_season_points
+from draftsim.distributions import DEFAULT_GAME_CV, GAME_CV, sample_season_points
 from optimizer.lineup import LineupPlayer, optimize
 from optimizer.startsit import start_sit_table
 
 #: Per-position **single-game** coefficient of variation (std ÷ mean of one week's fantasy points).
-#: Heuristic, informed by typical weekly fantasy variance — NOT the season CV × √17 used by the
-#: season sim (that over-skews a single game). QB/K steadiest; DEF/TE/WR the boom-bust positions.
-WEEKLY_CV: dict[str, float] = {
-    "QB": 0.45, "RB": 0.60, "WR": 0.70, "TE": 0.75, "K": 0.50, "DEF": 0.85,
-}
-DEFAULT_WEEKLY_CV = 0.65
+#: Heuristic, informed by typical weekly fantasy variance. QB/K steadiest; DEF/TE/WR the boom-bust
+#: positions. The shared knob lives in ``draftsim.distributions`` so the season sim's weekly draws
+#: use the SAME single-game noise (its season-level spread comes from a separate per-season factor).
+WEEKLY_CV: dict[str, float] = GAME_CV
+DEFAULT_WEEKLY_CV = DEFAULT_GAME_CV
 
 #: P(win) thresholds for the strategic posture (favor floor vs ceiling).
 FAVORITE = 0.65

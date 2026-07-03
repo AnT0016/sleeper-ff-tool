@@ -38,7 +38,8 @@ class SeasonInputs:
     schedule_source: str  # "real (matchups)" | "round-robin (generated)"
     completed: bool
     actual_champion: int | None  # team index, if the playoffs have finished
-    actual_rank: list[int] | None  # actual final standing per team index (1 = 1st)
+    actual_rank: list[int] | None  # actual REGULAR-SEASON finish per team index (1 = 1st)
+    actual_scores: dict[int, list[float]]  # week -> per-team real scores (in-season conditioning)
 
 
 def _team_name(user: dict) -> str:
@@ -65,7 +66,11 @@ def _display(pid: str, board: dict, master: dict) -> str:
 
 
 def _actual_standings(rosters: list[dict]) -> list[int]:
-    """Actual final rank per team index, from each roster's recorded wins then points-for."""
+    """Actual REGULAR-SEASON finish per team index (wins then points-for).
+
+    Note this is the seeding order, NOT the final placement — Sleeper decides final placements by
+    the playoff brackets (the champion is surfaced separately via the winners bracket).
+    """
     def key(t: int):
         s = rosters[t].get("settings") or {}
         fpts = float(s.get("fpts", 0)) + float(s.get("fpts_decimal", 0)) / 100.0
@@ -89,6 +94,35 @@ def _actual_champion(sleeper, league_id: str, roster_index: dict[int, int]) -> i
     return None
 
 
+def _actual_week_scores(
+    sleeper, league_id: str, weeks: list[int], roster_ids: list[int]
+) -> dict[int, list[float]]:
+    """Real per-team scores for already-played weeks (a week counts as played when anyone scored).
+
+    Used to condition a mid-season run on the actual results so the sim answers "odds from here",
+    not the preseason question. Weeks with no points yet (unplayed/future) are omitted.
+    """
+    idx = {int(r): i for i, r in enumerate(roster_ids)}
+    out: dict[int, list[float]] = {}
+    for w in weeks:
+        try:
+            rows = sleeper.get_matchups(league_id, w)
+        except Exception:
+            continue
+        vals = [0.0] * len(roster_ids)
+        any_points = False
+        for row in rows or []:
+            rid = row.get("roster_id")
+            if rid is None or int(rid) not in idx:
+                continue
+            pts = float(row.get("points") or 0.0)
+            vals[idx[int(rid)]] = pts
+            any_points = any_points or pts > 0.0
+        if any_points:
+            out[int(w)] = vals
+    return out
+
+
 def load_season_inputs(
     league_id: str,
     season: int | None = None,
@@ -103,6 +137,13 @@ def load_season_inputs(
     from .schedule import round_robin, schedule_from_matchups
 
     league = sleeper.get_league(league_id)
+    # Fail fast on a pre-draft league — empty rosters would otherwise "simulate" to garbage (all
+    # ties, team index 0 crowned in every sim) without an error.
+    status = (league.get("status") or "").lower()
+    if status in ("pre_draft", "drafting"):
+        raise ValueError(
+            f"league {league_id} is {status!r} — rosters aren't drafted yet, nothing to simulate"
+        )
     season = int(season or league.get("season") or 0)
     scoring = league["scoring_settings"]
     settings = league.get("settings") or {}
@@ -158,6 +199,17 @@ def load_season_inputs(
         n_teams=n_teams,
     )
 
+    # Fail loudly on the remaining degenerate states the sim would otherwise "answer" with garbage.
+    if any(not cols for cols in team_rosters):
+        raise ValueError(
+            f"league {league_id} has at least one empty roster — a season sim over it is meaningless"
+        )
+    if not np.any(pool.mean > 0):
+        raise ValueError(
+            f"no rostered player carries a positive {season} projection — Sleeper hasn't published "
+            f"{season} season projections yet (or the board failed to build)"
+        )
+
     schedule = schedule_from_matchups(sleeper, league_id, regular_weeks, roster_ids)
     if schedule:
         schedule_source = "real (matchups)"
@@ -165,10 +217,16 @@ def load_season_inputs(
         schedule = round_robin(n_teams, regular_weeks)
         schedule_source = "round-robin (generated)"
 
-    status = (league.get("status") or "").lower()
     completed = status == "complete"
     actual_champion = _actual_champion(sleeper, league_id, roster_index) if completed else None
     actual_rank = _actual_standings(rosters) if completed else None
+    # In-season: pin already-played weeks to the real scores (a completed season stays fully
+    # simulated — that's the preseason calibration question; conditioning it would be circular).
+    actual_scores = (
+        _actual_week_scores(sleeper, league_id, regular_weeks, roster_ids)
+        if status == "in_season"
+        else {}
+    )
 
     my_team = next(
         (i for i, r in enumerate(rosters) if str(r.get("owner_id")) == str(user_id)), 0
@@ -185,4 +243,5 @@ def load_season_inputs(
         completed=completed,
         actual_champion=actual_champion,
         actual_rank=actual_rank,
+        actual_scores=actual_scores,
     )

@@ -27,7 +27,9 @@ The repo is **public and needs no secrets** (Sleeper requires no auth), so hosti
 2. Go to **https://share.streamlit.io** and sign in with GitHub (authorize Streamlit if prompted).
 3. Click **Create app → Deploy a public app from GitHub**.
 4. Set **Repository** = `<you>/FantasyFootball`, **Branch** = `main`,
-   **Main file path** = `apps/season_app.py`. (Python deps are read from `pyproject.toml`.)
+   **Main file path** = `apps/season_app.py`. (Python deps come from `requirements.txt` — kept
+   deliberately minimal for the hosted app; the full pipeline deps in `pyproject.toml` are only for
+   local dev and the GitHub Actions refresh, and must NOT be installed by Streamlit Cloud.)
 5. Click **Deploy**. First build takes a couple of minutes.
 6. Done — no secrets to configure. The app **auto-redeploys** every time the GitHub Actions weekly
    refresh commits a new `data_cache/season.db`. Use the in-app **🔄 Reload snapshot** button to clear

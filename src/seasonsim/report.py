@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .distributions import INJURY_RISK, POSITION_CV, SEASON_GAMES
+from .distributions import GAME_CV, INJURY_RISK, POSITION_CV, SEASON_GAMES
 from .engine import SeasonSimOutput
 from .inputs import SeasonInputs
 
@@ -25,25 +25,31 @@ def _pct(x: float) -> str:
 
 
 def assumptions_block(out: SeasonSimOutput, inp: SeasonInputs) -> str:
-    w = out.total_weeks
     cv = " ".join(f"{p} {POSITION_CV[p]:.2f}" for p in _POS)
+    gcv = " ".join(f"{p} {GAME_CV[p]:.2f}" for p in _POS)
     inj = " ".join(f"{p} {INJURY_RISK[p][0]:.0%}/{INJURY_RISK[p][1]:.0f}g" for p in _POS)
-    return "\n".join(
-        [
-            "ASSUMPTIONS (directional & heuristic — NOT fitted to data; tune in src/seasonsim/):",
-            "  • Outcomes: weeks are independent lognormal draws whose sum reproduces each player's",
-            f"      custom-scored season projection. Weekly CV = season CV × √{w}. Season CV by pos: {cv}",
-            f"  • Injuries: one multi-week setback/season, P/mean-games (of {SEASON_GAMES}): {inj}",
-            "      → the player's lineup slot is empty for those weeks (bench gets tested).",
-            "  • Byes NOT modeled (season spread evenly over weeks) — uniform across teams; a v1 limit.",
-            f"  • Start/sit: managers set lineups from projected means ± N(0, {out.opp_noise:.2f}×mean) "
-            "noise;",
-            "      equal_skill = everyone equally sloppy; my_edge = I play clean (noise 0), rivals don't.",
-            f"  • Schedule: {inp.schedule_source}. Playoffs: top {out.n_playoff_teams}, "
-            f"weeks {out.playoff_weeks[0]}-{out.playoff_weeks[-1]} (locked bracket, top-2 bye).",
-            f"  • {out.n_sims} simulated seasons · seed {out.seed} · common random numbers across regimes.",
-        ]
-    )
+    lines = [
+        "ASSUMPTIONS (directional & heuristic — NOT fitted to data; tune in src/seasonsim/):",
+        "  • Outcomes: each week = single-game lognormal (realistic one-week noise, shared with the",
+        "      win-prob model) × a per-season factor sized so season totals keep the season CV.",
+        f"      Game CV by pos: {gcv}.  Season CV by pos: {cv}",
+        f"  • Injuries: one multi-week setback/season, P/mean-games (of {SEASON_GAMES}): {inj}",
+        "      → the player's lineup slot is empty for those weeks (bench gets tested).",
+        "  • Byes NOT modeled (season spread evenly over weeks) — uniform across teams; a v1 limit.",
+        f"  • Start/sit: managers set lineups from projected means ± N(0, {out.opp_noise:.2f}×mean) "
+        "noise;",
+        "      equal_skill = everyone equally sloppy; my_edge = I play clean (noise 0), rivals don't.",
+        f"  • Schedule: {inp.schedule_source}. Playoffs: top {out.n_playoff_teams}, "
+        f"weeks {out.playoff_weeks[0]}-{out.playoff_weeks[-1]} (locked bracket, top-2 bye).",
+        f"  • {out.n_sims} simulated seasons · seed {out.seed} · common random numbers across regimes.",
+    ]
+    if out.conditioned_weeks:
+        w0, w1 = min(out.conditioned_weeks), max(out.conditioned_weeks)
+        lines.append(
+            f"  • Conditioned on the REAL results of {len(out.conditioned_weeks)} played week(s) "
+            f"(W{w0}–W{w1}) — odds are from here, not preseason."
+        )
+    return "\n".join(lines)
 
 
 def my_season(out: SeasonSimOutput) -> str:
@@ -109,7 +115,10 @@ def league_board(out: SeasonSimOutput, inp: SeasonInputs) -> str:
             row += f"  {'#' + str(inp.actual_rank[t]) + star:>7}"
         lines.append(row + mark)
     if completed:
-        lines.append("  (actual = real final standing; ★ = the team that actually won the title.)")
+        lines.append(
+            "  (actual = real regular-season finish (seeding order), NOT final placement; "
+            "★ = the team that actually won the title.)"
+        )
     return "\n".join(lines)
 
 

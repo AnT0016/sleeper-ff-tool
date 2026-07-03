@@ -123,7 +123,8 @@ class WaiverInputs:
     slots: object
     players_map: Mapping[str, Mapping]
     my_players: list[LineupPlayer]
-    my_starters: list[LineupPlayer]  # optimal-lineup starters (all slots)
+    my_starters: list[LineupPlayer]  # THIS WEEK's optimal-lineup starters (bye/Out excluded)
+    depth_starters: list[LineupPlayer]  # season-basis starters ignoring this week's designations
     free_agent_ids: set
     scored: Mapping[str, Mapping]
     trending: Mapping[str, int]
@@ -174,6 +175,32 @@ def _fa_lineup_player(
     )
 
 
+def _depth_lineup_player(
+    pid: str, season_scored: Mapping[str, Mapping], players_map: Mapping[str, Mapping]
+) -> LineupPlayer | None:
+    """A rostered player on a SEASON-projection basis, fully startable (no bye/injury exclusion).
+
+    Used to solve my depth-chart lineup — who my real starters are regardless of this week's
+    designations — so the handcuff detector still monitors a starter who is Out right now.
+    ``None`` for players who can never occupy a lineup slot (IDP/unknown).
+    """
+    row = season_scored.get(pid) or {}
+    meta = players_map.get(pid) or {}
+    pos = row.get("pos") or meta.get("position")
+    if pos not in {"QB", "RB", "WR", "TE", "K", "DEF"}:
+        return None
+    is_def = pos == "DEF"
+    team = pid if is_def else (meta.get("team") or row.get("team"))
+    return LineupPlayer(
+        player_id=pid,
+        name=row.get("name") or _name(meta, pid),
+        pos=pos,
+        team=team,
+        proj_pts=round(float(row.get("proj") or 0.0), 2),
+        status=meta.get("injury_status") or None,
+    )
+
+
 def _bye_week_by_team(schedule_rows) -> dict[str, int]:
     """Each team's bye week: the REG week in the season it does not play (normalized to Sleeper)."""
     played: dict[str, set] = defaultdict(set)
@@ -220,16 +247,33 @@ def load_waiver_inputs(
     base_sol = optimize(my_players, slots)
     my_starters = [sp.player for sp in base_sol.starters]
 
-    # Free agents + standings/priority.
+    # Season-long projections (per-game baselines for stashes; season basis for the depth lineup).
+    season_scored = score_projections(sleeper.get_season_projections(season), scoring)
+
+    # My DEPTH-CHART starters: the season-long optimal lineup with this week's bye/injury eligibility
+    # ignored. The weekly optimal lineup hard-excludes Out/IR/bye players, so scanning IT for
+    # handcuffs can never see the "my starter is Out" case (CLAUDE.md: flag Q/D/O) — the injured
+    # starter is exactly who the detector must keep monitoring.
+    depth_pool = [
+        _depth_lineup_player(pid, season_scored, players_map)
+        for pid in (str(x) for x in (roster.get("players") or []))
+        if pid not in {str(x) for x in (roster.get("taxi") or [])}
+    ]
+    depth_pool = [p for p in depth_pool if p is not None]
+    depth_starters = [sp.player for sp in optimize(depth_pool, slots).starters]
+
+    # Free agents + standings/priority (posture weighs BOTH my standings rank and my actual slot in
+    # the waiver order — the ordered resource being spent).
     fa_ids = free_agents(players_map.keys(), rosters)
     standing = my_standing(rosters, user_id)
-    scarcity = priority_scarcity(standing.rank, len(rosters))
+    waiver_position = my_waiver_position(roster)
+    scarcity = priority_scarcity(standing.rank, len(rosters), waiver_position=waiver_position)
 
     # Trending adds -> contention (velocity).
     trending = {str(t["player_id"]): int(t.get("count") or 0) for t in sleeper.get_trending("add", limit=200)}
 
     # Handcuffs (and which backups just inherited a starting role: their starter is OUT this week).
-    handcuffs = find_handcuffs(my_starters, players_map, fa_ids)
+    handcuffs = find_handcuffs(depth_starters, players_map, fa_ids)
     new_starter_ids = {a.backup_id for a in handcuffs if a.starter_status == "Out"}
 
     # Spend candidates: top FAs per position (by this week's proj) + handcuff backups.
@@ -251,24 +295,33 @@ def load_waiver_inputs(
         for pid in cand_ids
     ]
 
-    # Stash candidates: every FA with a positive baseline projection this week.
+    # Stash candidates: every skill FA with a positive SEASON projection, at his per-game rate.
+    # This week's projection would be 0 for exactly the archetypal stash targets — a player on bye
+    # this week, or injured now but back by the playoff weeks. K/DEF are excluded: they stream on
+    # their own logic (``stream_candidates`` below), never stash.
     stash_candidates = [
         {
             "player_id": pid,
             "name": row.get("name") or pid,
             "pos": row.get("pos"),
-            "team": (pid if row.get("pos") == "DEF" else (players_map.get(pid, {}).get("team") or row.get("team"))),
-            "baseline": float(row.get("proj") or 0.0),
+            "team": (players_map.get(pid, {}).get("team") or row.get("team")),
+            "baseline": round(float(row.get("proj") or 0.0) / _SEASON_GAMES, 2),
         }
-        for pid, row in scored.items()
-        if pid in fa_ids and float(row.get("proj") or 0.0) > 0.0
+        for pid, row in season_scored.items()
+        if pid in fa_ids and row.get("pos") in _SKILL and float(row.get("proj") or 0.0) > 0.0
     ]
 
     # Self-computed SOS (season-to-date actuals re-scored in our settings) + schedule lookups.
-    actuals = nflverse.load_weekly_actuals(season)
-    reg = actuals.filter((actuals["season_type"] == "REG") & (actuals["week"] < week))
-    pa = points_allowed_by_position(reg.iter_rows(named=True), scoring)
-    sos = sos_multipliers(pa)
+    # Early in a season (or before it) nflverse has no weekly actuals yet — degrade to a neutral
+    # SOS (multiplier() defaults to 1.0) instead of crashing the whole waiver report.
+    try:
+        actuals = nflverse.load_weekly_actuals(season)
+        reg = actuals.filter((actuals["season_type"] == "REG") & (actuals["week"] < week))
+        pa = points_allowed_by_position(reg.iter_rows(named=True), scoring)
+        sos = sos_multipliers(pa)
+    except Exception as exc:
+        _LOG.warning("weekly actuals for %s unavailable (%s) — SOS defaults to neutral", season, exc)
+        sos = {}
 
     schedule_rows = list(nflverse.load_schedules(season).iter_rows(named=True))
     opp_by_week = opponents_by_week(schedule_rows, PLAYOFF_WEEKS)
@@ -289,7 +342,6 @@ def load_waiver_inputs(
     # K/DEF streaming horizons: this week + next week (real weekly projections), a rest-of-season
     # per-game level (season projection ÷ games), and a Weeks 15-17 outlook (DEF SOS-tilted, K flat).
     next_scored = score_projections(sleeper.get_projections(season, week + 1), scoring)
-    season_scored = score_projections(sleeper.get_season_projections(season), scoring)
     stream_candidates = _stream_candidates(
         scored, next_scored, season_scored, fa_ids, players_map, sos, opp_by_week
     )
@@ -333,13 +385,14 @@ def load_waiver_inputs(
         players_map=players_map,
         my_players=my_players,
         my_starters=my_starters,
+        depth_starters=depth_starters,
         free_agent_ids=fa_ids,
         scored=scored,
         trending=trending,
         scarcity=scarcity,
         my_rank=standing.rank,
         n_teams=len(rosters),
-        waiver_position=my_waiver_position(roster),
+        waiver_position=waiver_position,
         handcuffs=handcuffs,
         spend_candidates=spend_candidates,
         stash_candidates=stash_candidates,

@@ -3,11 +3,12 @@
 Two forward-looking views over the free-agent pool:
 
 * :func:`rank_playoff_stashes` -- rank available players by their **Weeks 15-17** value. Each
-  player's per-game baseline (this week's re-scored projection -- their talent/role level) is tilted
-  by the self-computed strength-of-schedule (``waivers.sos``): for each playoff week we multiply the
-  baseline by the matchup multiplier of that week's opponent for the player's position. We report
-  both the flat ``raw_value`` and the SOS-adjusted ``adj_value`` plus the per-week breakdown, so the
-  schedule's effect is transparent (per the confirmed design: SOS is the differentiator).
+  player's per-game baseline (season projection ÷ games -- their talent/role level, which survives a
+  bye or a short-term injury this week) is tilted by the self-computed strength-of-schedule
+  (``waivers.sos``): for each playoff week we multiply the baseline by the matchup multiplier of that
+  week's opponent for the player's position. We report both the flat ``raw_value`` and the
+  SOS-adjusted ``adj_value`` plus the per-week breakdown, so the schedule's effect is transparent
+  (per the confirmed design: SOS is the differentiator).
 * :func:`bye_stash_suggestions` -- detect upcoming weeks where one of my starters is on bye and
   suggest the best same-position free agent to stash to cover the hole.
 
@@ -41,7 +42,7 @@ class StashCandidate:
     name: str
     pos: str
     team: str | None
-    baseline: float  # per-game baseline (this week's re-scored projection)
+    baseline: float  # per-game baseline (season projection ÷ games)
     raw_value: float  # baseline summed over playoff weeks the team plays (flat, no SOS)
     adj_value: float  # SOS-adjusted playoff value
     weeks: tuple[WeekMatchup, ...]
@@ -125,13 +126,16 @@ def bye_stash_suggestions(
 
     ``my_starters`` are objects with ``name``, ``pos``, ``team`` (e.g. ``LineupPlayer``).
     ``bye_week_of_team`` maps a team to its bye week. Only byes in week ``from_week`` or later are
-    reported. ``fa_candidates`` are mappings with ``pos``, ``name``, ``baseline``.
+    reported. ``fa_candidates`` are mappings with ``pos``, ``name``, ``team``, ``baseline``. A
+    candidate whose own team shares the starter's bye week is skipped — he can't cover that hole.
     """
-    fa_by_pos: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    fa_by_pos: dict[str, list[tuple[str, float, str | None]]] = defaultdict(list)
     for c in fa_candidates:
-        fa_by_pos[c.get("pos")].append((c.get("name") or "?", float(c.get("baseline") or 0.0)))
+        fa_by_pos[c.get("pos")].append(
+            (c.get("name") or "?", float(c.get("baseline") or 0.0), c.get("team"))
+        )
     for lst in fa_by_pos.values():
-        lst.sort(key=lambda nb: nb[1], reverse=True)
+        lst.sort(key=lambda nbt: nbt[1], reverse=True)
 
     grouped: dict[tuple[int, str], list[str]] = defaultdict(list)
     for s in my_starters:
@@ -142,12 +146,17 @@ def bye_stash_suggestions(
 
     out: list[ByeStash] = []
     for (week, pos), idle in sorted(grouped.items()):
+        covers = [
+            (name, baseline)
+            for name, baseline, fa_team in fa_by_pos.get(pos, [])
+            if bye_week_of_team.get(fa_team or "") != week
+        ]
         out.append(
             ByeStash(
                 week=week,
                 pos=pos,
                 idle_starters=tuple(idle),
-                suggestions=tuple(fa_by_pos.get(pos, [])[:top]),
+                suggestions=tuple(covers[:top]),
             )
         )
     return out

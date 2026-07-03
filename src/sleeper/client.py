@@ -82,6 +82,21 @@ def get_players_nfl() -> dict:
     return _get(f"{V1}/players/nfl")
 
 
+def get_user_leagues(user_id: str, season: int, sport: str = "nfl") -> list[dict]:
+    """All of a user's leagues for a season -- how a new season's league id is discovered
+    at rollover (each league dict carries ``league_id``, ``name``, ``status``, ``season``)."""
+    return _get(f"{V1}/user/{user_id}/leagues/{sport}/{season}")
+
+
+def clear_http_cache() -> None:
+    """Drop every cached HTTP response (the requests-cache SQLite backend).
+
+    For draft-day 'reload' actions: Streamlit's ``st.cache_data.clear()`` only clears the app's
+    memo layer -- recomputed loaders would otherwise be served the same cached bytes for up to
+    the URL's TTL (projections 6h, league settings 1h)."""
+    _sess().cache.clear()
+
+
 def get_trending(kind: str, lookback_hours: int = 24, limit: int = 25) -> list[dict]:
     if kind not in ("add", "drop"):
         raise ValueError("kind must be 'add' or 'drop'")
@@ -92,8 +107,9 @@ def get_trending(kind: str, lookback_hours: int = 24, limit: int = 25) -> list[d
 
 
 # ------------------------------------------------------------------------- draft (live polling)
-# The HTTP layer (``http.URL_TTLS``) sets ``api.sleeper.app/v1/draft/*`` to DO_NOT_CACHE, so these
-# always hit the network -- the live draft tracker polls picks every ~3s.
+# The HTTP layer (``http.URL_TTLS``) sets ``api.sleeper.app/v1/draft/*`` AND the league's
+# ``/drafts`` discovery list to DO_NOT_CACHE, so these always hit the network -- the live draft
+# tracker polls picks every ~3s and a new draft must be visible the minute it is created.
 def get_league_drafts(league_id: str) -> list[dict]:
     """All drafts for a league (most leagues have one). Use to discover the ``draft_id``."""
     return _get(f"{V1}/league/{league_id}/drafts")

@@ -20,6 +20,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,8 +49,12 @@ from waivers.streaming import rank_streamers
 
 _LOG = logging.getLogger(__name__)
 
-#: Week-11 trade deadline (CLAUDE.md). The dashboard surfaces trade ideas before it.
+#: Fallback trade deadline when the league object is unavailable; the live ``settings.trade_deadline``
+#: is the source of truth (CLAUDE.md: the API wins).
 TRADE_DEADLINE_WEEK: int = 11
+
+#: NFL regular-season length — used to turn season-total projections into per-game baselines.
+SEASON_WEEKS: int = 17
 
 # data_cache/ is committed; season.db is the dashboard's only data source.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -93,7 +98,10 @@ def kickoff_by_team(
         )
         out: dict[str, str] = {}
         for r in reg.iter_rows(named=True):
-            label = f"{(r.get('weekday') or '')[:3]} {r.get('gametime') or ''}".strip()
+            gametime = r.get("gametime") or ""
+            weekday = (r.get("weekday") or "")[:3]
+            # The schedule's kickoff is US-Eastern; say so — the user plans in CEST.
+            label = f"{weekday} {gametime} ET".strip() if gametime else weekday
             home = _NFLVERSE_TO_SLEEPER.get(r.get("home_team"), r.get("home_team"))
             away = _NFLVERSE_TO_SLEEPER.get(r.get("away_team"), r.get("away_team"))
             if home:
@@ -106,25 +114,66 @@ def kickoff_by_team(
         return {}
 
 
+def final_fantasy_week(league: Mapping | None) -> int:
+    """The league's last playoff week (championship), from the live settings.
+
+    ``playoff_week_start`` + one week per bracket round (6 teams → 3 rounds → e.g. 15+2 = 17).
+    Falls back to the CLAUDE.md defaults when the league object is unavailable.
+    """
+    settings = (league or {}).get("settings") or {}
+    start = int(settings.get("playoff_week_start") or 15)
+    teams = int(settings.get("playoff_teams") or 6)
+    rounds = max(1, (teams - 1).bit_length())  # ceil(log2(teams)): 6 -> 3, 4 -> 2, 8 -> 3
+    return start + rounds - 1
+
+
 def offseason_skip_reason(
-    state: Mapping, week_arg: int | None, season_arg: int | None
+    state: Mapping, week_arg: int | None, season_arg: int | None, league: Mapping | None = None
 ) -> str | None:
     """Why a *scheduled* refresh should no-op, or ``None`` to proceed.
 
-    A fully-auto run (no explicit ``--week``/``--season``) is skipped when Sleeper isn't in a regular
-    season — in the off-/pre-season there is no nflverse data or projection to compute yet, and the
-    upstream parquet 404s. An explicit week or season override always runs (manual backfill), and an
-    unknown/empty state falls through to a normal build (offline dev). Once the season kicks off
-    (``season_type == "regular"``) the scheduled job resumes on its own.
+    A fully-auto run (no explicit ``--week``/``--season``) is skipped when:
+
+    * Sleeper isn't in a regular season — in the off-/pre-season there is no nflverse data or
+      projection to compute yet, and the upstream parquet 404s;
+    * the configured league doesn't belong to the NFL's current season (or is already complete) —
+      the 2026-rollover fail-safe: when the NFL season kicks off but ``LEAGUE_ID`` still points at
+      last year's league, publishing would silently mix seasons. Update ``sleeper.config.LEAGUE_ID``;
+    * the league's fantasy season is over (NFL week past the championship week) — don't overwrite
+      the final championship-week snapshot with a meaningless late build.
+
+    An explicit week or season override always runs (manual backfill). An unknown/empty state falls
+    through here (offline dev) — the *caller* decides whether to proceed or abort in that case.
     """
     if week_arg is not None or season_arg is not None:
         return None
-    season_type = str((state or {}).get("season_type") or "")
+    state = state or {}
+    season_type = str(state.get("season_type") or "")
     if season_type and season_type != "regular":
         return (
-            f"off-season (season_type={season_type!r}, week={(state or {}).get('week')}) — "
+            f"off-season (season_type={season_type!r}, week={state.get('week')}) — "
             "nothing to refresh; leaving the last snapshot in place"
         )
+    league_season = str((league or {}).get("season") or "")
+    state_season = str(state.get("season") or "")
+    if league_season and state_season and league_season != state_season:
+        return (
+            f"league {(league or {}).get('league_id')} is a {league_season} league but the NFL is in "
+            f"{state_season} — update sleeper.config.LEAGUE_ID for the new season (rollover fail-safe)"
+        )
+    if league and str(league.get("status") or "") == "complete":
+        return (
+            f"league {league.get('league_id')} is complete — nothing to refresh; update "
+            "sleeper.config.LEAGUE_ID for the new season"
+        )
+    if league:
+        week = int(state.get("week") or 0)
+        final = final_fantasy_week(league)
+        if week > final:
+            return (
+                f"fantasy season over (NFL week {week} > championship week {final}) — "
+                "leaving the final snapshot in place"
+            )
     return None
 
 
@@ -174,6 +223,7 @@ def _season_lineup_players(
                 pos=pos,
                 team=team_abbr,
                 proj_pts=round(float(row.get("proj") or 0.0), 2),
+                status=meta.get("injury_status") or None,
             )
         )
     return players
@@ -206,6 +256,14 @@ def build_snapshot(
     sleeper=client,
 ) -> tuple[dict[str, pd.DataFrame], dict]:
     """Compute every dashboard table for one week. Returns ``(tables, meta)``; pure compute below."""
+    # League settings drive the trade deadline and playoff weeks (the API is the source of truth).
+    league = sleeper.get_league(league_id)
+    settings = league.get("settings") or {}
+    trade_deadline = int(settings.get("trade_deadline") or TRADE_DEADLINE_WEEK)
+    playoff_start = int(settings.get("playoff_week_start") or 15)
+    final_week = final_fantasy_week(league)
+    playoff_weeks = tuple(range(playoff_start, final_week + 1))
+
     # --- Phase 3: my weekly lineup + start/sit -------------------------------------------------
     lineup_inp = load_lineup_inputs(league_id, user_id, season, week, sleeper=sleeper)
     sol = optimize(lineup_inp.players, lineup_inp.slots)
@@ -274,7 +332,9 @@ def build_snapshot(
         }
         for a in spend_advice(w.spend_candidates, w.my_players, w.slots, w.scarcity)
     ]
-    stashes = rank_playoff_stashes(w.stash_candidates, w.sos, w.opponents_by_week)
+    stashes = rank_playoff_stashes(
+        w.stash_candidates, w.sos, w.opponents_by_week, playoff_weeks=playoff_weeks
+    )
     stash_rows = [
         {
             "name": s.name,
@@ -296,7 +356,7 @@ def build_snapshot(
             "suggestions": ", ".join(f"{n} ({v:.1f})" for n, v in b.suggestions) or "no clear FA",
         }
         for b in bye_stash_suggestions(
-            w.my_starters, w.bye_week_of_team, w.stash_candidates, from_week=week + 1
+            w.depth_starters, w.bye_week_of_team, w.stash_candidates, from_week=week + 1
         )
     ]
     streamer_rows = [
@@ -383,12 +443,38 @@ def build_snapshot(
     bye_gaps = team.bye_week_gaps(my_season_players, w.bye_week_of_team, w.slots, from_week=week)
     needs = team.positional_needs(season_strengths, my_season_players, w.slots, bye_gaps)
     trades = team.trade_targets(season_pts, my_rid, names, season_strengths)
+
+    # Trades are valued in REST-OF-SEASON points (next week through the championship), not full-season
+    # totals — points already banked can't be traded for. Uniform scaling keeps the win-win logic
+    # intact; the status columns below flag players (e.g. Out — not IR-eligible in this league) whose
+    # projection may not survive to the playoffs.
+    remaining_weeks = max(final_week - week, 0)
+    ros_scale = remaining_weeks / SEASON_WEEKS
+    ros_players_by_team = {
+        rid: [replace(p, proj_pts=round(p.proj_pts * ros_scale, 2)) for p in pls]
+        for rid, pls in season_players_by_team.items()
+    }
     trade_offers = find_trades(
-        season_players_by_team.get(my_rid, my_season_players),
-        {rid: pls for rid, pls in season_players_by_team.items() if rid != my_rid},
+        ros_players_by_team.get(my_rid, []),
+        {rid: pls for rid, pls in ros_players_by_team.items() if rid != my_rid},
         w.slots, names,
     )
-    outlook = team.playoff_outlook(w.my_starters, w.sos, w.opponents_by_week)
+    status_by_pid = {
+        p.player_id: (p.status or "")
+        for pls in season_players_by_team.values()
+        for p in pls
+    }
+
+    # Playoff outlook: my SEASON-optimal starters at their per-game rate — this week's lineup would
+    # drop anyone on bye/Out *this* week from the Weeks-15..17 projection (CLAUDE.md: playoff value
+    # is the combined custom-scored projection over the playoff weeks).
+    season_starters_pg = [
+        replace(sp.player, proj_pts=round(sp.player.proj_pts / SEASON_WEEKS, 2))
+        for sp in starters_season.get(my_rid, [])
+    ]
+    outlook = team.playoff_outlook(
+        season_starters_pg, w.sos, w.opponents_by_week, playoff_weeks=playoff_weeks
+    )
 
     def _strength_rows(strengths: Sequence[team.PositionStrength]):
         return [
@@ -467,8 +553,10 @@ def build_snapshot(
                     "partner": o.partner,
                     "give": o.give_name,
                     "give_pos": o.give_pos,
+                    "give_status": status_by_pid.get(o.give_id, ""),
                     "get": o.get_name,
                     "get_pos": o.get_pos,
+                    "get_status": status_by_pid.get(o.get_id, ""),
                     "my_gain": o.my_gain,
                     "their_gain": o.their_gain,
                 }
@@ -497,7 +585,8 @@ def build_snapshot(
         "lineup_status": sol.status,
         "holes": json.dumps(sol.holes),
         "playoff_total": round(sum(s.adj_value for s in outlook), 2),
-        "trade_deadline_week": TRADE_DEADLINE_WEEK,
+        "trade_deadline_week": trade_deadline,
+        "final_week": final_week,
         "win_prob": round(win_prob, 4),
         "opp_name": opp_name,
         "opp_proj": round(opp_proj, 2),

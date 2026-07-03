@@ -30,10 +30,12 @@ DEFAULT_EXPIRE = _HOUR
 
 # First matching pattern wins, so order most-specific first. Patterns match host + path.
 URL_TTLS: dict[str, int] = {
-    "api.sleeper.app/v1/draft/*": DO_NOT_CACHE,        # live draft polling
-    "api.sleeper.app/v1/players/nfl*": _DAY,           # ~5MB dump, once/day
-    "api.sleeper.com/projections/*": 6 * _HOUR,        # weekly projections
-    "api.sleeper.app/v1/league/*": _HOUR,              # scoring/roster/rosters
+    "api.sleeper.app/v1/draft/*": DO_NOT_CACHE,          # live draft polling
+    "api.sleeper.app/v1/league/*/drafts": DO_NOT_CACHE,  # draft discovery (a draft can appear any minute on draft day)
+    "api.sleeper.app/v1/players/nfl/trending/*": _HOUR,  # waiver trending signal, changes hourly
+    "api.sleeper.app/v1/players/nfl*": _DAY,             # ~5MB dump, once/day
+    "api.sleeper.com/projections/*": 6 * _HOUR,          # weekly projections
+    "api.sleeper.app/v1/league/*": _HOUR,                # scoring/roster/rosters
 }
 
 

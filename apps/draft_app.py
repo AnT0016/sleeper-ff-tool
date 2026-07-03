@@ -66,12 +66,12 @@ def load_vor_board(season: int, league_id: str, base_starters: tuple, flex_total
     return board
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+# Short TTL + no swallowed exceptions: st.cache_data never caches a raised error, so a network blip
+# is NOT remembered as "no drafts" — and the HTTP layer keeps this endpoint uncached, so a draft
+# created seconds ago shows up on the next rerun.
+@st.cache_data(ttl=60, show_spinner=False)
 def discover_drafts(league_id: str) -> list[dict]:
-    try:
-        return client.get_league_drafts(league_id) or []
-    except Exception:
-        return []
+    return client.get_league_drafts(league_id) or []
 
 
 # --------------------------------------------------------------------------- helpers (UI-only)
@@ -98,22 +98,40 @@ st.sidebar.header("Draft")
 league_id = st.sidebar.text_input("League ID", value=LEAGUE_ID, help="Used to discover the draft.").strip()
 draft_id = st.sidebar.text_input("Draft ID", value="", help="Paste the draft_id, or pick one below.").strip()
 
+# The reload button renders BEFORE any code path that can st.stop(), so it is always reachable on
+# draft night. It clears BOTH cache layers: st.cache_data only drops the app's memo layer — the
+# requests-cache backend would otherwise serve the same bytes (projections 6h, league settings 1h).
+if st.sidebar.button("🔄 Reload projections / settings"):
+    st.cache_data.clear()
+    try:
+        client.clear_http_cache()
+    except Exception:
+        pass
+    st.rerun()
+
 if not draft_id:
-    found = discover_drafts(league_id)
+    try:
+        found = discover_drafts(league_id)
+    except Exception as e:
+        st.sidebar.error(f"Could not reach Sleeper to list drafts: {e}")
+        found = []
     if found:
         labels = {f"{d.get('season')} · {d.get('status')} · {d['draft_id']}": d["draft_id"] for d in found}
         choice = st.sidebar.selectbox("…or pick a draft for this league", list(labels))
         draft_id = labels[choice]
     else:
-        st.sidebar.warning("No draft found for this league yet. Paste a Draft ID.")
+        st.sidebar.warning("No draft found for this league yet. Paste a Draft ID, or Reload to retry.")
         st.stop()
 
 my_user_id = st.sidebar.text_input("My user ID", value=MY_USER_ID).strip()
 
 try:
-    default_season = int(client.get_state().get("season") or 2025)
+    default_season = int(client.get_state().get("season") or 0)
 except Exception:
-    default_season = 2025
+    default_season = 0
+if not default_season:
+    from datetime import date
+    default_season = date.today().year
 season = st.sidebar.number_input("Projection season", min_value=2020, max_value=2100, value=default_season)
 
 st.sidebar.header("Live")
@@ -122,23 +140,37 @@ interval = st.sidebar.number_input("Poll interval (s)", min_value=1, max_value=3
 cushion = st.sidebar.slider("Survival cushion (picks)", 2, 18, 6, help="ADP margin for 🟢/🟡/🔴.")
 run_window = st.sidebar.slider("Run window (picks)", 4, 24, 12, help="Window for positional-run counts.")
 top_n = st.sidebar.slider("Board rows", 15, 100, 40)
-if st.sidebar.button("🔄 Reload projections / settings"):
-    st.cache_data.clear()
-    st.rerun()
 
 # --------------------------------------------------------------------------- load + prep (once per full run)
-draft = load_draft(draft_id)
+# Guarded: a network blip during a full rerun must never blank the UI mid-draft. The draft endpoint
+# is deliberately never HTTP-cached (live polling), so fall back to the last good object we saw.
+try:
+    draft = load_draft(draft_id)
+    st.session_state["last_good_draft"] = draft
+except Exception as e:
+    draft = st.session_state.get("last_good_draft")
+    if draft is None:
+        st.error(f"Could not fetch the draft: {e}. Check the connection, then press 🔄 Reload.")
+        st.stop()
+    st.warning(f"Sleeper unreachable ({e}) — showing the last good draft state; polling continues.")
 settings = draft.get("settings") or {}
 cfg = roster.roster_config(settings)
 scoring_league_id = draft.get("league_id") or league_id
-users = load_users(scoring_league_id)
+try:
+    users = load_users(scoring_league_id)
+except Exception:  # display names are cosmetic — never block the board over them
+    users = {}
 
-board = load_vor_board(
-    int(season),
-    scoring_league_id,
-    tuple(sorted(roster.base_starters(cfg).items())),
-    roster.flex_slots_total(cfg),
-)
+try:
+    board = load_vor_board(
+        int(season),
+        scoring_league_id,
+        tuple(sorted(roster.base_starters(cfg).items())),
+        roster.flex_slots_total(cfg),
+    )
+except Exception as e:
+    st.error(f"Could not build the projection board: {e}. Check the connection, then press 🔄 Reload.")
+    st.stop()
 # VOR rank (1 = best) for the "Val" steals/reaches column: how a player's value rank compares to ADP.
 vor_rank = {p.player_id: i + 1 for i, p in enumerate(board)}
 
@@ -155,6 +187,19 @@ st.caption(cap + (f" · **your slot: {my_slot}**" if my_slot else " · **slot no
 # --------------------------------------------------------------------------- live fragment (polls picks)
 @st.fragment(run_every=(interval if auto else None))
 def live_panel() -> None:
+    # The slot/config live in the main body's closure, which fragment reruns never re-execute. While
+    # the slot is unrevealed, poll the (never-HTTP-cached) draft object too and promote to a FULL
+    # rerun the moment draft_order populates — otherwise "unlocks once draft_order populates" would
+    # only ever happen on a manual refresh.
+    if my_slot is None:
+        try:
+            fresh = client.get_draft(draft_id)
+        except Exception:
+            fresh = None
+        if fresh and (fresh.get("draft_order") or {}).get(my_user_id):
+            load_draft.clear()
+            st.rerun(scope="app")
+
     try:
         picks = client.get_draft_picks(draft_id) or []
     except Exception as e:  # keep the UI alive on a flaky connection
@@ -168,8 +213,8 @@ def live_panel() -> None:
     fresh = roster.new_since(picks, last_seen)
     st.session_state["last_pick_no"] = picks_made
 
-    # --- our roster so far + needs
-    mine = roster.my_drafted(picks, my_user_id)
+    # --- our roster so far + needs (slot join catches CPU autopicks, which may not carry picked_by)
+    mine = roster.my_drafted(picks, my_user_id, my_slot=my_slot)
     my_positions = [roster.pick_position(p) for p in mine if roster.pick_position(p)]
     status = roster.roster_status(my_positions, cfg)
     needs = roster.needed_positions(status, cfg)

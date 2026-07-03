@@ -33,7 +33,8 @@ class TradeOffer:
     get_id: str
     get_name: str
     get_pos: str
-    my_gain: float  # change in MY optimal starting-lineup value (season points)
+    my_gain: float  # change in MY optimal starting-lineup value (in the caller's projection basis
+    #                 — the snapshot passes rest-of-season points, not full-season totals)
     their_gain: float  # change in the PARTNER's optimal lineup value
 
     @property

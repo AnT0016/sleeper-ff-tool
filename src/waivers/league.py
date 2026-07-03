@@ -123,8 +123,11 @@ class PriorityScarcity:
     note: str
 
 
-def priority_scarcity(rank: int, n_teams: int) -> PriorityScarcity:
-    """Read my claim's value from my standings ``rank`` (1 = best) of ``n_teams``.
+def priority_scarcity(
+    rank: int, n_teams: int, *, waiver_position: int | None = None
+) -> PriorityScarcity:
+    """Read my claim's value from my standings ``rank`` (1 = best) of ``n_teams``, refined by my
+    actual slot in the waiver order (``waiver_position``, 1 = next claim wins) when known.
 
     Reverse-standings priority means the *worst* teams hold the highest (best) waiver priority and
     recover it quickly, while contenders sit at the back and regain a top claim slowly. So:
@@ -132,9 +135,35 @@ def priority_scarcity(rank: int, n_teams: int) -> PriorityScarcity:
     * top third of the standings  -> priority is scarce and slow to recover -> **selective**;
     * bottom third                -> durable high priority -> **aggressive**;
     * middle                      -> **balanced**.
+
+    The waiver order refines this: what a claim *costs* is the slot I currently hold. If I already
+    sit at the back of the order, "spending" a claim costs me almost nothing regardless of my
+    standings — be aggressive. Only a claim near the front is a scarce resource worth protecting.
     """
     n = max(int(n_teams), 1)
     frac = (rank - 1) / max(n - 1, 1)  # 0.0 = best team, 1.0 = worst team
+    if waiver_position is not None and n > 1:
+        wfrac = (int(waiver_position) - 1) / max(n - 1, 1)  # 0.0 = front of the order, 1.0 = back
+        if wfrac >= 2 / 3:
+            return PriorityScarcity(
+                rank=rank,
+                n_teams=n,
+                posture="aggressive",
+                note=(
+                    f"you already sit #{int(waiver_position)} of {n} in the waiver order -- a claim "
+                    "costs you almost nothing right now; spend on any startable upgrade"
+                ),
+            )
+        if wfrac <= 1 / 3 and frac <= 1 / 3:
+            return PriorityScarcity(
+                rank=rank,
+                n_teams=n,
+                posture="selective",
+                note=(
+                    f"you hold a front-of-order claim (#{int(waiver_position)} of {n}) as a contender "
+                    "-- it is scarce and slow to recover; spend it only on a clear startable upgrade"
+                ),
+            )
     if frac <= 1 / 3:
         posture, note = "selective", "near the top of the standings: a top claim is scarce and slow to recover -- spend it only on a clear startable upgrade"
     elif frac >= 2 / 3:

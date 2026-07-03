@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Make the src/ packages importable (kept for parity with the other apps; this app needs no src
@@ -180,6 +181,28 @@ if st.button("🔄 Reload snapshot"):
     st.cache_data.clear()
     st.rerun()
 
+
+# Staleness guard: the refresh cron deliberately no-ops in the off-season, leaving the last snapshot
+# in place — say so instead of presenting months-old advice (win prob, deadline countdown) as live.
+def _staleness_days(meta_row: dict) -> float | None:
+    try:
+        gen = datetime.strptime(
+            str(meta_row.get("generated_at", "")), "%Y-%m-%d %H:%M:%S UTC"
+        ).replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - gen).total_seconds() / 86400.0
+    except Exception:
+        return None
+
+
+stale_days = _staleness_days(meta)
+snapshot_stale = stale_days is not None and stale_days > 8
+if snapshot_stale:
+    st.warning(
+        f"🕰️ **This snapshot is {stale_days:.0f} days old** ({season} Week {week}). The weekly "
+        "refresh pauses in the off-season, so everything below is the season's last state — "
+        "historical context, not live advice."
+    )
+
 tab_week, tab_waiver, tab_team, tab_bt = st.tabs(
     ["📅 This Week", "🔁 Waivers & Stash", "📊 Team Analysis", "📈 Backtest"]
 )
@@ -313,26 +336,41 @@ with tab_waiver:
 
 # =========================================================================== TEAM ANALYSIS
 with tab_team:
-    # ----- trade ideas (prominent before the deadline) -------------------------------------
+    # ----- trade ideas (prominent before the deadline; silent when the snapshot is stale) ----
     weeks_left = deadline - week
-    if week and week < deadline:
+    if snapshot_stale:
+        pass  # a months-old countdown ("1 week left to deal!") is actively misleading
+    elif week and week < deadline:
         st.warning(f"⏰ **Trade deadline is Week {deadline}** — {weeks_left} week(s) left to deal.")
     elif week and week >= deadline:
         st.info(f"Trade deadline (Week {deadline}) has passed — trades are closed.")
 
     st.subheader("🤝 Trade offers — win-win 1-for-1 swaps")
     st.caption(
-        "Concrete player-for-player deals where **both** teams' best starting lineup improves "
-        "(season-long, in our scoring). 'gain' = season points added to each side's optimal lineup — "
-        "a deal the partner has a real reason to accept."
+        "Concrete player-for-player deals where **both** teams' best starting lineup improves, "
+        "valued in **rest-of-season** points (this week through the championship) in our scoring — "
+        "a deal the partner has a real reason to accept. A status flag (Out/Questionable/…) means "
+        "the projection may not survive to the playoff weeks: check the injury timeline first."
     )
     offers = load_table("trade_offers", mt)
     if offers.empty:
         st.caption("No win-win 1-for-1 fits right now (need a swap that upgrades both lineups).")
     else:
         v = offers.copy()
-        v["you give"] = v.apply(lambda r: f"{r['give']} ({r['give_pos']})", axis=1)
-        v["you get"] = v.apply(lambda r: f"{r['get']} ({r['get_pos']})", axis=1)
+
+        def _tag(name, pos, status):
+            flag = f" ⚠{status}" if status else ""
+            return f"{name} ({pos}){flag}"
+
+        has_status = "give_status" in v.columns  # older committed snapshots predate the column
+        v["you give"] = v.apply(
+            lambda r: _tag(r["give"], r["give_pos"], r.get("give_status", "") if has_status else ""),
+            axis=1,
+        )
+        v["you get"] = v.apply(
+            lambda r: _tag(r["get"], r["get_pos"], r.get("get_status", "") if has_status else ""),
+            axis=1,
+        )
         v = v.rename(columns={"my_gain": "your gain", "their_gain": "their gain"})
         show(v[["partner", "you give", "you get", "your gain", "their gain"]])
 
@@ -462,17 +500,20 @@ with tab_bt:
 
         weekly = load_bt("weekly", bmt)
         if not weekly.empty:
-            flips = int(((weekly["result"] == "L") & (weekly["optimal_result"] == "W")).sum())
+            # Regular-season flips only — the sentence pairs the count with the regular-season record.
             reg = weekly[~weekly["playoff"].astype(bool)]
+            flips = int(((reg["result"] == "L") & (reg["optimal_result"] == "W")).sum())
             st.markdown(
                 f"Starting your **best legal lineup every week** would have turned "
-                f"**{flips}** loss(es) into wins — a **{bm.get('actual_record','')} → "
-                f"**{bm.get('optimal_record','')}** regular season — and left **0** of those "
-                f"{bm.get('bench_lost_total', 0):.0f} bench points behind. "
+                f"**{flips}** regular-season loss(es) into wins — a "
+                f"**{bm.get('actual_record','')} → {bm.get('optimal_record','')}** regular season — "
+                f"by capturing the **{bm.get('bench_lost_total', 0):.0f}** points left on the bench. "
                 f"Following the tool's *projection* lineup (scored by real results) went "
                 f"**{bm.get('tool_record','')}** ({bm.get('tool_total',0):.0f} pts) — proof that the "
                 f"edge is the optimizer's ceiling, not raw projections."
             )
+            if bm.get("draft_note"):
+                st.caption(f"⚠️ {bm['draft_note']}")
 
             # ----- actual vs optimal vs tool, by week --------------------------------------
             chart = weekly.set_index("week")[["actual", "optimal", "tool"]]

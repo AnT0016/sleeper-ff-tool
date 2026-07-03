@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -76,14 +76,16 @@ class SeasonSimOutput:
     n_playoff_teams: int
     regimes: dict[str, RegimeResult]
     opp_noise: float
+    conditioned_weeks: list[int] = field(default_factory=list)  # weeks pinned to real scores
 
 
 def pool_arrays(pool: SeasonPool):
-    """Per-player CV / setback / severity, filling per-position defaults from the shared knobs."""
+    """Per-player season CV / game CV / setback / severity from the shared per-position knobs."""
     cv = np.array([dist.POSITION_CV.get(p, dist.DEFAULT_CV) for p in pool.pos], dtype=float)
+    gcv = np.array([dist.GAME_CV.get(p, dist.DEFAULT_GAME_CV) for p in pool.pos], dtype=float)
     p_set = np.array([dist.INJURY_RISK.get(p, dist.DEFAULT_RISK)[0] for p in pool.pos], dtype=float)
     sev = np.array([dist.INJURY_RISK.get(p, dist.DEFAULT_RISK)[1] for p in pool.pos], dtype=float)
-    return cv, p_set, sev
+    return cv, gcv, p_set, sev
 
 
 def team_week_scores(
@@ -166,14 +168,20 @@ def simulate_season(
     seed: int = 0,
     opp_noise: float = DEFAULT_OPP_NOISE,
     my_noise: float = DEFAULT_MY_NOISE,
+    actual_scores: Mapping[int, Sequence[float]] | None = None,
 ) -> SeasonSimOutput:
-    """Run the full-season Monte Carlo and return per-team + my-team aggregates for both regimes."""
+    """Run the full-season Monte Carlo and return per-team + my-team aggregates for both regimes.
+
+    ``actual_scores`` (week -> per-team-index real scores) pins already-played weeks to what actually
+    happened in every sim — a mid-season run then answers "title odds from HERE (my real record)",
+    not the preseason question. Weeks absent from the mapping are simulated as usual.
+    """
     total_weeks = int(max(playoff_weeks))
-    cv, p_set, sev = pool_arrays(pool)
+    cv, gcv, p_set, sev = pool_arrays(pool)
     mean_week = pool.mean / float(total_weeks)
 
     rng = np.random.default_rng(seed)
-    weekly = dist.sample_weekly_points(rng, pool.mean, cv, n_sims, total_weeks)
+    weekly = dist.sample_weekly_points(rng, pool.mean, cv, n_sims, total_weeks, game_cv=gcv)
     out = dist.sample_injury_out(rng, p_set, sev, n_sims, total_weeks)
     raw_noise = rng.standard_normal(weekly.shape)
     realized = weekly * (~out)
@@ -188,6 +196,9 @@ def simulate_season(
     }
     for name, team_noise in noise_by_regime.items():
         scores = team_week_scores(pool, realized, out, mean_week, raw_noise, team_noise)
+        for w, vals in (actual_scores or {}).items():
+            if 1 <= int(w) <= total_weeks:
+                scores[:, :, int(w) - 1] = np.asarray(vals, dtype=float)[None, :]
         res = _rank_and_champ(scores, schedule, playoff_cols, n_playoff_teams, my_team)
         res.name = name
         regimes[name] = res
@@ -204,6 +215,7 @@ def simulate_season(
         n_playoff_teams=n_playoff_teams,
         regimes=regimes,
         opp_noise=opp_noise,
+        conditioned_weeks=sorted(int(w) for w in (actual_scores or {})),
     )
 
 

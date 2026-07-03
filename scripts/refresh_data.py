@@ -41,16 +41,27 @@ def main() -> None:
         state = client.get_state()
     except Exception:
         state = {}
+    try:
+        league = client.get_league(args.league)
+    except Exception:
+        league = {}
 
-    # Off-season no-op: a scheduled run has no data to compute until the season kicks off, and the
-    # nflverse parquet 404s. Exit 0 (not a failure) so the weekly cron stays green; resumes on its own.
-    reason = offseason_skip_reason(state, args.week, args.season)
+    # A fully-auto (scheduled) run must never guess: with no reachable state there is no way to know
+    # the season/week, and building a wrong-week snapshot would be silently committed. Fail red so
+    # the cron surfaces the problem; a manual backfill can always pass --week/--season explicitly.
+    if not state and args.week is None and args.season is None:
+        sys.exit("could not determine the current season/week (Sleeper state unreachable) — "
+                 "aborting the scheduled refresh; pass --week/--season to run anyway")
+
+    # Off-season / rollover / post-championship no-op: exit 0 (not a failure) so the weekly cron
+    # stays green; it resumes on its own once a *current-season* league is configured and playing.
+    reason = offseason_skip_reason(state, args.week, args.season, league)
     if reason:
         print(f"Skipping refresh — {reason}.")
         return
 
-    season = args.season or int(state.get("season") or 2025)
-    week = args.week or int(state.get("week") or 0) or 1  # week is 0 in the off-season -> use 1
+    season = args.season or int(state["season"])
+    week = args.week or max(1, int(state.get("week") or 0))
 
     print(f"Refreshing season snapshot — {season} Week {week} (league {args.league}) → {args.out}")
     out = build_and_write(args.league, args.user, season, week, db_path=args.out)

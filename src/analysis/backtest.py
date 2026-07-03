@@ -104,6 +104,7 @@ def simulate_draft(
     *,
     caps: Mapping[str, int] = DRAFT_CAPS,
     default_cap: int = 999,
+    my_slot: int | None = None,
 ) -> list[dict]:
     """Replay the snake draft, substituting a greedy policy for *my* picks only.
 
@@ -111,7 +112,9 @@ def simulate_draft(
     of my pick numbers the tool takes the available player with the **smallest** ``order_key`` whose
     position is below its cap. Pass ``{pid: -vor}`` for a VOR-greedy draft, or an ADP key for a
     market-ADP draft — this is how the backtest compares "draft by our VOR" to "draft by market ADP"
-    (the naive baseline) on the same real board. Returns ``[{pick_no, round, my_pid, tool_pid}, ...]``.
+    (the naive baseline) on the same real board. My picks match on ``picked_by`` OR (when known) on
+    ``draft_slot`` — a CPU autopick may not carry my user id. Returns
+    ``[{pick_no, round, my_pid, tool_pid}, ...]``.
     """
     taken: set[str] = set()
     pos_count: dict[str, int] = defaultdict(int)
@@ -119,7 +122,10 @@ def simulate_draft(
     rows: list[dict] = []
     for pk in sorted(picks, key=lambda p: int(p["pick_no"])):
         pid = str(pk.get("player_id"))
-        if str(pk.get("picked_by")) != str(my_user_id):
+        is_mine = str(pk.get("picked_by")) == str(my_user_id) or (
+            my_slot is not None and int(pk.get("draft_slot") or 0) == int(my_slot)
+        )
+        if not is_mine:
             taken.add(pid)  # another team drafts the player they really drafted
             continue
         best_id, best_key = None, float("inf")
@@ -433,8 +439,11 @@ def build_backtest(
 
     # --- draft backtest --------------------------------------------------------------------------
     draft_id = (sleeper.get_league_drafts(league_id) or [{}])[0].get("draft_id")
-    cfg = draft_roster.roster_config((sleeper.get_draft(draft_id).get("settings") or {})) if draft_id else None
+    draft_obj = sleeper.get_draft(draft_id) if draft_id else {}
+    cfg = draft_roster.roster_config(draft_obj.get("settings") or {}) if draft_id else None
     picks = sleeper.get_draft_picks(draft_id) if draft_id else []
+    # My slot from draft_order (robust vs picked_by for autopicked/commissioner picks).
+    my_slot = int((draft_obj.get("draft_order") or {}).get(str(user_id)) or 0) or None
     board = build_board(season, scoring)
     if board and cfg:
         repl = replacement_levels(board, draft_roster.base_starters(cfg),
@@ -466,8 +475,8 @@ def build_backtest(
         p.player_id: (p.adp if p.adp != float("inf") else _BIG - p.proj_pts) for p in board
     }
     cap = cfg.rounds if cfg else 999
-    sim = simulate_draft(picks, user_id, vor_order, pos_by_id, default_cap=cap)
-    sim_adp = simulate_draft(picks, user_id, adp_order, pos_by_id, default_cap=cap)
+    sim = simulate_draft(picks, user_id, vor_order, pos_by_id, default_cap=cap, my_slot=my_slot)
+    sim_adp = simulate_draft(picks, user_id, adp_order, pos_by_id, default_cap=cap, my_slot=my_slot)
     adp_pid_by_pick = {r["pick_no"]: r["tool_pid"] for r in sim_adp}
 
     draft_rows = []
@@ -490,7 +499,7 @@ def build_backtest(
 
     # --- full draftboard (all teams) + transactions timeline -------------------------------------
     draftboard = draftboard_rows(picks, names, name_by_id, pos_by_id, season_pts, my_rid)
-    my_draft_slot = next((r["slot"] for r in draftboard if r["is_mine"]), 0)
+    my_draft_slot = my_slot or next((r["slot"] for r in draftboard if r["is_mine"]), 0)
 
     tx_rows: list[dict] = []
     for w in range(1, max_week + 1):
@@ -530,6 +539,14 @@ def build_backtest(
         "draft_id": str(draft_id),
         "my_draft_slot": int(my_draft_slot),
         "n_transactions": len(tx_rows),
+        # Honesty note surfaced by the dashboard: for a retrospective season, Sleeper's projections/
+        # ADP endpoints serve their LATEST values (not the preseason ones), so the draft replay is
+        # not fully ex-ante. 2026 onward has a frozen preseason snapshot (data/frozen.py) for a
+        # clean out-of-sample comparison.
+        "draft_note": (
+            f"Draft replay uses Sleeper's latest {season} projections/ADP — retrospective seasons "
+            "carry some hindsight; from 2026 the frozen preseason snapshot removes it."
+        ),
     }
     tables = {
         "weekly": pd.DataFrame(weekly_rows),

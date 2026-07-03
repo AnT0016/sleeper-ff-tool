@@ -275,8 +275,8 @@ def test_kickoff_by_team_labels_and_normalizes():
         }
     )
     k = kickoff_by_team(2025, 5, fetch_schedules=lambda s: sched)
-    assert k["LAR"] == "Sun 13:00 vs BUF"
-    assert k["BUF"] == "Sun 13:00 @ LAR"
+    assert k["LAR"] == "Sun 13:00 ET vs BUF"
+    assert k["BUF"] == "Sun 13:00 ET @ LAR"
     assert "ZZZ" not in k and "YYY" not in k  # preseason filtered out
 
 

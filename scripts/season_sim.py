@@ -35,7 +35,10 @@ def main() -> None:
     ap.add_argument("--my-noise", type=float, default=DEFAULT_MY_NOISE, help="my start/sit noise")
     args = ap.parse_args()
 
-    inp = load_season_inputs(args.league, args.season, user_id=args.user)
+    try:
+        inp = load_season_inputs(args.league, args.season, user_id=args.user)
+    except ValueError as exc:  # degenerate league states (pre-draft, no projections) fail clean
+        sys.exit(f"Cannot simulate: {exc}")
     out = simulate_season(
         inp.pool,
         inp.schedule,
@@ -48,6 +51,7 @@ def main() -> None:
         seed=args.seed,
         opp_noise=args.opp_noise,
         my_noise=args.my_noise,
+        actual_scores=inp.actual_scores,  # mid-season: pin played weeks to the real results
     )
 
     # Windows consoles default to cp1252; the report uses ·/→/★/← etc.

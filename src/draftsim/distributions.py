@@ -37,6 +37,20 @@ POSITION_CV: dict[str, float] = {
 }
 DEFAULT_CV = 0.30
 
+#: Coefficient of variation of a SINGLE GAME's fantasy points, by position (std ÷ mean of one week).
+#: Much larger than the season CV per week-slice would suggest naively — but far smaller than the
+#: independence-derived ``season CV × √17``, which over-skews one game (a 12-pt WR's median ≈ 7).
+#: Shared by the win-probability model and the season sim so the two stay consistent.
+GAME_CV: dict[str, float] = {
+    "QB": 0.45,
+    "RB": 0.60,
+    "WR": 0.70,
+    "TE": 0.75,
+    "K": 0.50,
+    "DEF": 0.85,
+}
+DEFAULT_GAME_CV = 0.65
+
 #: (P(a significant multi-week setback in a season), mean games missed when it occurs), by position.
 #: RBs get hurt most and miss the most time; K/DEF are nearly never the reason you lose a week.
 INJURY_RISK: dict[str, tuple[float, float]] = {

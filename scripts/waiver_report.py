@@ -114,7 +114,7 @@ def main() -> None:
 
     # 4) Bye-week stash suggestions -------------------------------------------------------------
     byes = bye_stash_suggestions(
-        inp.my_starters, inp.bye_week_of_team, inp.stash_candidates, from_week=args.week + 1
+        inp.depth_starters, inp.bye_week_of_team, inp.stash_candidates, from_week=args.week + 1
     )
     if byes:
         print("\n--- Upcoming starter byes (stash a fill-in now) ---")

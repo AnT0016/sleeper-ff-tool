@@ -93,9 +93,19 @@ def drafted_ids(picks: Sequence[Mapping]) -> set[str]:
     return {str(p.get("player_id")) for p in picks if p.get("player_id") is not None}
 
 
-def my_drafted(picks: Sequence[Mapping], user_id: str) -> list[dict]:
-    """Our picks so far, ordered by overall pick number."""
-    mine = [p for p in picks if str(p.get("picked_by")) == str(user_id)]
+def my_drafted(picks: Sequence[Mapping], user_id: str, *, my_slot: int | None = None) -> list[dict]:
+    """Our picks so far, ordered by overall pick number.
+
+    Matches on ``picked_by`` OR (when known) on ``draft_slot`` — a CPU autopick after a missed
+    clock, or a commissioner-made pick, may not carry our user id in ``picked_by``, but the slot
+    always owns its picks in a snake draft.
+    """
+    mine = [
+        p
+        for p in picks
+        if str(p.get("picked_by")) == str(user_id)
+        or (my_slot is not None and int(p.get("draft_slot") or 0) == int(my_slot))
+    ]
     return sorted(mine, key=lambda p: p.get("pick_no") or 0)
 
 

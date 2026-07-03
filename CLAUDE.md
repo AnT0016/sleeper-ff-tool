@@ -81,10 +81,11 @@ Engine = `sum(stat_value * scoring_settings.get(key, 0))` over all stat keys. FG
 - Don't draft K or DEF early — the edge is weekly streaming via custom scoring, not draft position.
 - No secrets in the repo (Sleeper needs none; if a FantasyPros key is added, use Streamlit/Actions secrets).
 
-## TODO — fill in
-- `LEAGUE_ID`: `1257071615817043968` — 2025 league "Fantasy Campechano" (scoring source of truth + validation data). Lives in [src/sleeper/config.py](src/sleeper/config.py); override via `SLEEPER_LEAGUE_ID`. **The 2026 redraft league will be a NEW id once created** — update config then.
-- `PREVIOUS_LEAGUE_ID`: `1124851086289559552` (2024).
-- `DRAFT_ID`: __________  (known on draft day; find via `GET /league/<LEAGUE_ID>/drafts`)
+## League ids (registry: [src/sleeper/config.py](src/sleeper/config.py))
+- `LEAGUE_ID` (ACTIVE): `1378062197778833408` — 2026 **"Test league"** sandbox, settings copied from the 2025 league (scoring/roster/waivers/playoffs identical, verified against the API). **Swap to the real 2026 league id once the league is recreated** — one line in config.py, or per-run via `SLEEPER_LEAGUE_ID`; discover it with `client.get_user_leagues(MY_USER_ID, 2026)`. The weekly refresh fail-safes on a league-vs-NFL season mismatch, so a stale id skips instead of publishing a wrong snapshot.
+- `LEAGUE_ID_2025` (= `PREVIOUS_LEAGUE_ID`): `1257071615817043968` — "Fantasy Campechano", complete; scoring source of truth + validation data.
+- `LEAGUE_ID_2024`: `1124851086289559552` — complete.
+- `DRAFT_ID`: test league's draft is `1378062202891685888`; the real one is known on draft day via `GET /league/<LEAGUE_ID>/drafts` (never HTTP-cached — a just-created draft is visible immediately).
 - `MY_USER_ID` / team: `866260653093036032` (username `ant0016`)
 
 > Reconciled against the API: roster is **5 bench + 1 IR** (IR lives in `settings.reserve_slots`; `reserve_allow_cov=1`, all other `reserve_allow_*` are 0 — matching the IR rules above). The earlier "Bench 6" was corrected to 5. Scoring (42 keys) matches this file exactly. The 2026 redraft league will be a new id — re-confirm roster/scoring against the API once it exists.
