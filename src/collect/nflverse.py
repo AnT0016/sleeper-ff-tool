@@ -226,6 +226,50 @@ def _identified(frame: pl.DataFrame, key_cols: Sequence[str], source: str) -> pl
     return frame.filter(usable)
 
 
+def _latest_revision(
+    frame: pl.DataFrame, key_cols: Sequence[str], stamp: str, source: str
+) -> pl.DataFrame:
+    """``frame`` reduced to the newest ``stamp`` per key — a *grain* reduction, like :func:`_identified`.
+
+    Some nflverse feeds are revision streams: the 2016-2024 injury report re-lists a player as the
+    week firms up (Questionable after Wednesday's practice, Out after Friday's). Where the registry
+    key is the underlying fact rather than the revision, those extra rows are provider grain, not
+    duplicates, and the collector has to resolve them *before* the store sees them.
+
+    Doing it here rather than leaving it to ``dedupe_rows``' collapse is the same call
+    :func:`_identified` makes, for the same reason: that collapse warns, so every capture of every
+    legacy season would fire a defect warning about two rows nobody needs to act on — which is how an
+    operator learns to ignore the warning that matters.
+
+    Rows whose key is **not usable** are passed through untouched rather than collapsed.
+    ``unique(subset=...)`` folds nulls together exactly as the store's dedup does, so collapsing them
+    here would destroy real rows *before* :func:`_identified` could filter and count them — the same
+    silent loss this module exists to make audible, just moved one step earlier.
+
+    A feed without ``stamp`` is returned untouched (nflverse dropped ``date_modified`` in 2025, and a
+    feed with no revisions to order needs no ordering). A feed missing a *key* column is also
+    returned untouched, so ``_collect`` raises its own "the provider schema has changed" rather than
+    this helper failing first with a bare ``ColumnNotFoundError``.
+    """
+    keys = list(key_cols)
+    if stamp not in frame.columns or any(k not in frame.columns for k in keys):
+        return frame
+
+    usable = _usable_key(frame, keys)
+    resolvable = frame.filter(usable)
+    reduced = resolvable.sort(stamp, nulls_last=False).unique(
+        subset=keys, keep="last", maintain_order=True
+    )
+    dropped = resolvable.height - reduced.height
+    if dropped:
+        _LOG.info(
+            "%s: collapsed %d superseded %s revision(s) of %d row(s) (%.2f%%) to the newest per %s",
+            source, dropped, stamp, frame.height, dropped / frame.height * 100, keys,
+        )
+    unusable = frame.filter(~usable)
+    return reduced if not unusable.height else pl.concat([reduced, unusable])
+
+
 def _collect(source: str, season: int, frame: pl.DataFrame) -> Collected:
     """One loader frame -> one season-partitioned capture, keyed by the registry."""
     key_cols = SOURCES[source].key_cols
@@ -278,18 +322,35 @@ def collect_ff_opportunity(season: int, *, load: Loader | None = None) -> Collec
 
 
 def collect_injuries(season: int, *, load: Loader | None = None) -> Collected:
-    """``nflverse_injuries``: the weekly practice/game-status report.
+    """``nflverse_injuries``: the weekly practice/game-status report, keyed by player-week.
 
-    ``date_modified`` is in the key because the report is a *revision stream*, not a weekly fact: a
-    player is routinely listed twice in one week (Questionable after Wednesday's practice, Out after
-    Friday's), and a key without it collapses the two into whichever the provider happened to list
-    last — persisting a stale status with no warning. Verified on real 2024 data: 6,215/6,215 rows
-    unique with it, 2 collisions without.
+    The key is ``(gsis_id, game_type, week)`` and **not** ``date_modified``, which this collector
+    used to require. Two things settle that:
+
+    * **The revision stream is worth 0.03%.** The stated reason for keying on the report revision was
+      that a player is routinely listed twice in one week (Questionable after Wednesday's practice,
+      Out after Friday's). On the real 2024 feed that is **2 player-weeks out of 6,213** — the row
+      loss was real but tiny. 2025 is unique on the player-week outright (6,068/6,068).
+    * **nflverse dropped the column in 2025.** Keying on it made the source uncapturable from 2025
+      forward — it raised on every backfill of a modern season and would have raised on every 2026
+      pre-lock run.
+
+    Nothing is lost. ``date_modified`` stays as a payload column where the feed carries it, and
+    :func:`_latest_revision` resolves the collapse so the surviving row is the **newest** revision —
+    the final pre-game report, which is the one worth training on for a season reconstructed after
+    the fact. And for the capture that actually matters, the store already models the revision stream
+    better: pre-lock runs Thursday *and* Sunday, and a row is kept per key **per UTC capture date**,
+    so the two statuses are two rows stamped with when *we* saw them rather than when the provider
+    edited them.
 
     Secondary to Sleeper's ``injury_status`` for start/sit (CLAUDE.md), but this one is genuinely
     point-in-time and backfillable, which the Sleeper master is not.
     """
-    return _collect("nflverse_injuries", season, (load or nflverse.load_injuries)(season))
+    source = "nflverse_injuries"
+    frame = (load or nflverse.load_injuries)(season)
+    return _collect(
+        source, season, _latest_revision(frame, SOURCES[source].key_cols, "date_modified", source)
+    )
 
 
 def collect_schedules(season: int, *, load: Loader | None = None) -> Collected:

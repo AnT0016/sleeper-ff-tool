@@ -79,13 +79,16 @@ def test_grains_match_the_shape_of_each_source():
     assert "week" in SOURCES["nflverse_player_week"].key_cols
 
 
-def test_injury_key_includes_the_report_revision():
-    """A player is listed twice in a week as the report firms up (Questionable -> Out).
+def test_the_injury_key_is_the_player_week_not_the_report_revision():
+    """``date_modified`` is deliberately *out* of this key -- see #17.
 
-    Without ``date_modified`` those revisions share a key and one is silently dropped -- see
-    ``tests/test_store.py::test_injury_report_revisions_survive_the_registry_key``.
+    It was in it on the grounds that a player is commonly re-listed within a week. Measured, that is
+    2 player-weeks out of 6,213 in 2024 (0.03%), and nflverse dropped the column outright in 2025,
+    which made the source uncapturable from that season on. The revision that matters is now the
+    capture date: pre-lock runs Thursday *and* Sunday, and the store keeps a row per key per UTC
+    capture date. ``collect.nflverse._latest_revision`` resolves the legacy collisions to the newest.
     """
-    assert "date_modified" in SOURCES["nflverse_injuries"].key_cols
+    assert SOURCES["nflverse_injuries"].key_cols == ("gsis_id", "game_type", "week")
 
 
 def test_prelock_cadence_is_the_point_in_time_capture():

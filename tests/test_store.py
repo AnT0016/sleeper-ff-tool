@@ -275,33 +275,48 @@ INJURY_REVISIONS = [
 ]
 
 
-def test_injury_report_revisions_survive_the_registry_key(backend):
-    """Regression (real 2024 W15 shape): one player, two same-week revisions, Questionable -> Out.
+def test_rows_one_capture_cannot_separate_are_dropped_but_never_silently(backend, caplog):
+    """Pins the *class* of bug on the real 2024 W15 shape: two same-week revisions of one player.
 
-    Keyed without ``date_modified`` the store kept 1 of the 2 -- and because ``keep="last"`` follows
-    provider row order rather than the revision time, the survivor was the stale *Questionable*.
+    The registry key is the player-week (#17), so this pair is not separable within one capture and
+    the store keeps one of them. That is correct behaviour *given these rows* — and the reason
+    ``collect.nflverse._latest_revision`` resolves the collision to the newest revision before the
+    store ever sees it. What must never happen is the drop being quiet.
     """
-    write_snapshot(
-        "nflverse_injuries", 2024, INJURY_REVISIONS, captured_at=MON,
-        key_cols=SOURCES["nflverse_injuries"].key_cols, backend=backend,
-    )
-    df = read_snapshot("nflverse_injuries", 2024, backend=backend)
-
-    assert len(df) == 2
-    assert set(df["report_status"]) == {"Questionable", "Out"}
-
-
-def test_the_superseded_injury_key_loses_a_revision_but_is_no_longer_silent(backend, caplog):
-    """Pins the *class* of bug: the old key still loses the row, but now says so."""
     with caplog.at_level(logging.WARNING, logger="store.lake"):
         write_snapshot(
             "nflverse_injuries", 2024, INJURY_REVISIONS, captured_at=MON,
-            key_cols=("gsis_id", "game_type", "week"), backend=backend,
+            key_cols=SOURCES["nflverse_injuries"].key_cols, backend=backend,
         )
 
     assert len(read_snapshot("nflverse_injuries", 2024, backend=backend)) == 1  # the loss
     assert "do not identify rows within one capture" in caplog.text            # now audible
     assert "00-0039359" in caplog.text                                         # names the offender
+
+
+def test_a_player_weeks_status_change_survives_as_two_captures_on_different_days(backend):
+    """What replaced ``date_modified``: the revision stream is the *capture* stream.
+
+    Pre-lock runs Thursday and Sunday, and the store keeps a row per key per UTC capture date. So
+    Thursday's Questionable and Sunday's Out are two rows — stamped with when *we* observed them
+    rather than when the provider edited the report, which is the more useful point-in-time fact and
+    the one #7 can actually gate on.
+    """
+    key_cols = SOURCES["nflverse_injuries"].key_cols
+    thursday, sunday = INJURY_REVISIONS
+    write_snapshot("nflverse_injuries", 2024, [thursday], captured_at="2024-12-12T22:00:00+00:00",
+                   key_cols=key_cols, backend=backend)
+    write_snapshot("nflverse_injuries", 2024, [sunday], captured_at="2024-12-15T15:00:00+00:00",
+                   key_cols=key_cols, backend=backend)
+
+    df = read_snapshot("nflverse_injuries", 2024, backend=backend)
+    assert len(df) == 2
+    assert set(df["report_status"]) == {"Questionable", "Out"}
+    # And they are told apart by capture date, not by anything in the payload.
+    assert dict(zip(df["_captured_at"].str[:10], df["report_status"], strict=True)) == {
+        "2024-12-12": "Questionable",
+        "2024-12-15": "Out",
+    }
 
 
 def test_null_key_values_warn(backend, caplog):

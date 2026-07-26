@@ -319,39 +319,100 @@ def test_a_source_with_no_known_residual_warns_on_the_very_first_dropped_row(cap
     assert [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-def test_injury_revisions_are_kept_because_date_modified_is_in_the_key(captures):
-    """A player listed twice in one week is two point-in-time facts, not a duplicate.
+def test_a_re_reported_player_week_collapses_to_its_newest_revision(captures):
+    """The key is the player-week, so a re-report is provider grain — resolved, not kept.
 
-    Without ``date_modified`` the pair collapses to whichever the provider listed last, persisting a
-    stale status silently. The fixture carries exactly one such re-reported player-week.
+    It must resolve to the *final* pre-game status. Keeping whichever row the provider happened to
+    list last is the original defect: on the real 2024 W15 shape that survivor was the stale
+    *Questionable* rather than the Out that followed Friday's practice.
     """
     raw = frame("injuries_2024")
-    without = raw.select("gsis_id", "game_type", "week").unique().height
-    assert without < raw.height, "fixture no longer carries a re-reported player-week"
+    keys = ["gsis_id", "game_type", "week"]
+    distinct = raw.select(keys).unique().height
+    assert distinct < raw.height, "fixture no longer carries a re-reported player-week"
 
     capture = captures["nflverse_injuries"]
-    assert len(capture.rows) == raw.height  # both revisions survive
+    assert len(capture.rows) == distinct  # one row per player-week, not per revision
 
-    revisions = {}
-    for row in capture.rows:
-        revisions.setdefault((row["gsis_id"], row["game_type"], row["week"]), []).append(
-            row["date_modified"]
+    # The survivor of the collision is the newest revision of that player-week.
+    collided = (
+        raw.group_by(keys).len().filter(pl.col("len") > 1).select(keys).to_dicts()
+    )
+    assert collided, "fixture no longer carries a collision to resolve"
+    for key in collided:
+        newest = (
+            raw.filter(pl.all_horizontal([pl.col(k) == v for k, v in key.items()]))
+            .sort("date_modified")
+            .to_dicts()[-1]
         )
-    assert any(len(stamps) > 1 for stamps in revisions.values())
+        kept = next(
+            r for r in capture.rows if all(r[k] == v for k, v in key.items())
+        )
+        assert kept["report_status"] == newest["report_status"]
+        assert kept["date_modified"] == newest["date_modified"].astimezone(
+            timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_feed_with_no_revision_column_collects_unchanged():
+    """nflverse dropped ``date_modified`` in 2025 — the 2025+ feed must need no special case."""
+    modern = frame("injuries_2024").drop("date_modified")
+    capture = collect_injuries(SEASON, load=lambda *_a, **_k: modern)
+    assert len(capture.rows) == modern.select("gsis_id", "game_type", "week").unique().height
+    assert "date_modified" not in capture.rows[0]
+
+
+def test_the_revision_collapse_never_folds_null_keyed_rows_together(caplog):
+    """``unique(subset=...)`` treats nulls as equal — exactly like the store's dedup.
+
+    Collapsing them here would destroy real rows one step *before* ``_identified`` could filter and
+    count them, turning an audible grain filter into silent loss. They must pass through untouched
+    and still be reported.
+    """
+    raw = frame("injuries_2024")
+    broken = raw.with_columns(
+        pl.when(pl.int_range(pl.len()) < raw.height // 2)
+        .then(None)
+        .otherwise(pl.col("gsis_id"))
+        .alias("gsis_id")
+    )
+    nulled = raw.height // 2
+
+    with caplog.at_level(logging.DEBUG, logger="collect.nflverse"):
+        collect_injuries(SEASON, load=lambda *_a, **_k: broken)
+
+    # Every null-keyed row reaches _identified and is counted there — none vanish in the collapse.
+    filtered = [r for r in caplog.records if "filtered" in r.getMessage()]
+    assert len(filtered) == 1
+    assert f"filtered {nulled}/{raw.height}" in filtered[0].getMessage()
+
+
+def test_the_revision_collapse_is_quiet_because_it_is_grain_not_a_defect(caplog):
+    """Every legacy capture would otherwise warn about two rows nobody needs to act on."""
+    with caplog.at_level(logging.INFO, logger="collect.nflverse"):
+        collect_injuries(SEASON, load=lambda *_a, **_k: frame("injuries_2024"))
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "collapsed" in caplog.text and "date_modified" in caplog.text
 
 
 def test_temporal_columns_become_iso_utc_strings(captures):
-    """``date_modified`` is a key value: as a string it round-trips parquet and sorts chronologically."""
-    expected = sorted(
-        row["date_modified"].astimezone(timezone.utc) for row in frame("injuries_2024").to_dicts()
-    )
-    parsed = []
+    """As strings they round-trip parquet and sort chronologically (``dt`` is a depth *key* value)."""
+    # The newest raw revision per player-week — what the capture should be carrying after the
+    # collapse, compared instant-for-instant so seconds precision is provably lossless on this feed.
+    newest: dict[tuple, datetime] = {}
+    for row in frame("injuries_2024").to_dicts():
+        key = (row["gsis_id"], row["game_type"], row["week"])
+        stamp = row["date_modified"].astimezone(timezone.utc)
+        newest[key] = max(stamp, newest.get(key, stamp))
+
+    seen = 0
     for row in captures["nflverse_injuries"].rows:
         stamp = row["date_modified"]
         assert isinstance(stamp, str) and _ISO_UTC_RE.match(stamp), stamp
-        parsed.append(datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc))
-    # Equal instant-for-instant, so seconds precision is provably lossless on this feed.
-    assert sorted(parsed) == expected
+        parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        assert parsed == newest[(row["gsis_id"], row["game_type"], row["week"])]
+        seen += 1
+    assert seen == len(newest)
 
 
 def test_a_date_column_renders_as_a_plain_iso_date():
@@ -397,13 +458,17 @@ def test_an_empty_capture_never_blanks_an_existing_partition(tmp_path):
 
 
 def test_a_missing_key_column_raises_rather_than_keying_on_what_is_left():
-    """A provider dropping a key column must not yield a capture the store merges on a partial key."""
-    truncated = frame("injuries_2024").drop("date_modified")
+    """A provider dropping a key column must not yield a capture the store merges on a partial key.
+
+    ``gsis_id``, not ``date_modified``: the latter is no longer a key column, precisely because this
+    guard fired on every 2025 capture once nflverse dropped it (see #17).
+    """
+    truncated = frame("injuries_2024").drop("gsis_id")
 
     def load(*_args, **_kwargs):
         return truncated
 
-    with pytest.raises(ValueError, match="date_modified"):
+    with pytest.raises(ValueError, match="gsis_id"):
         collect_injuries(SEASON, load=load)
 
 
