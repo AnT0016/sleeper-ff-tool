@@ -11,6 +11,7 @@ import pytest
 
 from collect.registry import (
     CADENCES,
+    CONTENT_KNOWN,
     GRAINS,
     SOURCES,
     Source,
@@ -151,6 +152,22 @@ def test_a_start_year_on_a_forward_only_source_is_rejected():
         _make(backfillable_from=2020)
 
 
+def test_every_source_declares_a_known_content_known():
+    assert {s.content_known for s in SOURCES.values()} <= set(CONTENT_KNOWN)
+
+
+def test_schedules_is_post_game_despite_running_pre_lock():
+    """The reason ``content_known`` exists at all — cadence is not knowability.
+
+    ``nflverse_schedules`` is captured on the pre-lock cadence *and* carries ``result`` /
+    ``home_score`` / ``away_score`` / ``total``. Deriving "is this legal as a week-N feature" from
+    the cadence would hand the assembler the label.
+    """
+    schedules = SOURCES["nflverse_schedules"]
+    assert "prelock" in schedules.cadence
+    assert schedules.content_known == "post_game"
+
+
 def test_sources_for_cadence_rejects_an_unknown_cadence():
     with pytest.raises(ValueError, match="unknown cadence"):
         sources_for_cadence("midweek")
@@ -164,6 +181,7 @@ def _make(**overrides):
         "key_cols": ("player_id",),
         "cadence": frozenset({"prelock"}),
         "backfillable": False,
+        "content_known": "pre_kickoff",
     }
     kwargs.update(overrides)
     return Source(**kwargs)
@@ -183,6 +201,7 @@ def test_source_accepts_a_valid_definition():
         ({"key_cols": ("player_id", "_captured_at")}, "exclude reserved"),
         ({"cadence": frozenset()}, "cadence must be non-empty"),
         ({"cadence": frozenset({"whenever"})}, "unknown cadence"),
+        ({"content_known": "eventually"}, "content_known"),
         ({"cadence": frozenset({"backfill"})}, "contradicts cadence"),
         ({"backfillable": True}, "contradicts cadence"),
     ],
