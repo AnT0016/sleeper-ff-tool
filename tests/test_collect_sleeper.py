@@ -21,7 +21,12 @@ import pytest
 
 from collect.base import Collected
 from collect.registry import SOURCES
-from collect.sleeper import collect_proj_season, collect_proj_week, collect_stats_week
+from collect.sleeper import (
+    _INJURY_FIELDS,
+    collect_proj_season,
+    collect_proj_week,
+    collect_stats_week,
+)
 from store.lake import RESERVED, LocalParquetBackend, read_snapshot, write_snapshot
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sleeper_raw_2025_w1.json"
@@ -256,6 +261,48 @@ def test_meta_comes_from_the_point_in_time_row_not_the_player_master():
     assert (row["position"], row["fantasy_positions"]) == ("WR", "WR")
     assert row["opponent"] == "CHI"
     assert "season" not in row and "week" not in row  # the store stamps _season/_week
+
+
+def test_injury_fields_are_captured_only_on_the_forward_only_sources(captures):
+    """Sleeper's injury_status is the project's *authoritative* injury signal, and Sleeper-keyed.
+
+    Captured on the live pre-lock sources, where the mutable ``player`` master is genuinely as-of
+    capture. Deliberately NOT on ``sleeper_stats_week``: it is backfillable, so a 2018 row would
+    carry today's status — sharper than the stale-position problem, because injury status is wildly
+    time-varying (a 2018 row reading Questionable because he is questionable *now* is just false).
+    """
+    for name in ("sleeper_proj_week", "sleeper_proj_season"):
+        for row in captures[name].rows:
+            assert set(_INJURY_FIELDS) <= set(row), f"{name}: injury fields missing"
+
+    for row in captures["sleeper_stats_week"].rows:
+        assert not set(_INJURY_FIELDS) & set(row), "backfillable source must not carry injury fields"
+
+
+def test_injury_fields_come_from_the_player_master():
+    """They exist nowhere else in the payload — same source as position, same as-of-capture caveat."""
+    rows = [
+        {
+            "player_id": "42",
+            "team": "MIN",
+            "player": {
+                "position": "WR",
+                "fantasy_positions": ["WR"],
+                "injury_status": "Questionable",
+                "injury_body_part": "Hamstring",
+                "injury_start_date": "2026-09-10",
+            },
+            "stats": {"rec_yd": 55.0},
+        }
+    ]
+    proj = collect_proj_week(SEASON, WEEK, fetch=_fetch(rows)).rows[0]
+    assert proj["injury_status"] == "Questionable"
+    assert proj["injury_body_part"] == "Hamstring"
+    assert proj["injury_start_date"] == "2026-09-10"
+
+    # Same input through the backfillable source: the fields are dropped, not merely nulled.
+    stats = collect_stats_week(SEASON, WEEK, fetch=_fetch(rows)).rows[0]
+    assert not set(_INJURY_FIELDS) & set(stats)
 
 
 def test_teamless_rows_are_kept_with_null_game_meta(raw, captures):

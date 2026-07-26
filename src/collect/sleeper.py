@@ -60,6 +60,26 @@ live weekly captures these sources are built for.
    ``nflverse_depth`` — the one registered source that is genuinely as-of a date (``dt`` is in its
    key, ``pos_abb`` is the value) — falling back to this static label under an explicit
    ``position_is_static`` flag.
+
+Sleeper's **injury fields** (``injury_status`` / ``injury_body_part`` / ``injury_start_date``) come
+from that same ``player`` master, but are lifted onto the **forward-only sources only** — and that
+restriction is the whole point. They are captured because Sleeper's ``injury_status`` is this
+project's *authoritative* injury signal (``optimizer.inputs``: "authoritative per CLAUDE.md"; the
+nflverse report is the secondary cross-check), because it needs no crosswalk (Sleeper-keyed, where
+``nflverse_injuries`` is ``gsis_id``-keyed), and because it carries roster states the official
+practice report has no equivalent for — a live master shows ``PUP``/``NA``/``Sus``/``IR`` alongside
+``Questionable``. On a live pre-lock capture it is exactly "what we believed before kickoff", and it
+is unrecoverable afterwards.
+
+``sleeper_stats_week`` deliberately does **not** get them. It is backfillable, and a backfilled 2018
+row would carry *today's* status — a sharper error than the stale-``position`` one above: position is
+stable, so a stale label is merely imprecise, whereas injury status is wildly time-varying, so a 2018
+row reading ``Questionable`` because the player is questionable *now* is simply false.
+
+(``player.metadata`` carries occasional ``injury_override_<type>_<season>_<week>`` keys that look like
+a per-week injury history. They are not one — across the entire master there are 279 such keys on 247
+players, 170 of them from 2020 alone. A sparse legacy artifact, not a backfill source; checked so it
+need not be re-investigated.)
 """
 
 from __future__ import annotations
@@ -89,6 +109,16 @@ _META: tuple[str, ...] = (
     "company",
     "last_modified",
 )
+
+#: Injury fields lifted from the embedded ``player`` master. Sleeper's ``injury_status`` is the
+#: project's authoritative injury signal and needs no crosswalk; it also covers roster states the
+#: official practice report lacks (PUP/NA/Sus/IR).
+_INJURY_FIELDS: tuple[str, ...] = ("injury_status", "injury_body_part", "injury_start_date")
+
+#: Sources whose captures are live and pre-lock, so ``player``'s *mutable* injury fields are
+#: genuinely as-of capture time. ``sleeper_stats_week`` is excluded on purpose: it is backfillable,
+#: and a backfilled row would carry today's status rather than that week's (see the module docstring).
+_INJURY_SOURCES: frozenset[str] = frozenset({"sleeper_proj_week", "sleeper_proj_season"})
 
 
 def _player_id(raw: Mapping[str, Any]) -> str | None:
@@ -130,6 +160,8 @@ def _flatten(raw: Mapping[str, Any], *, source: str, key_cols: Sequence[str]) ->
         "position": player.get("position"),
         "fantasy_positions": _fantasy_positions(player),
     }
+    if source in _INJURY_SOURCES:
+        row.update({name: player.get(name) for name in _INJURY_FIELDS})
     row.update({name: raw.get(name) for name in _META})
 
     # A stat shadowing a KEY column would replace the row's identity (and undo _player_id's str
