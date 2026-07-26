@@ -43,6 +43,12 @@ live weekly captures these sources are built for.
    just relabels the same contamination. Real conversions are invisible in both: Taysom Hill (QB in
    2018) and Cordarrelle Patterson (WR in 2018) read back as TE and RB respectively.
 
+   **``fantasy_positions`` is not a mitigation.** It comes from the same mutable master and collapses
+   the same way. Sleeper carried Hill as QB/TE-eligible while he was starting at QB, but the master
+   returns ``['TE']`` today — and so does the embedded ``player`` object on a **2018** stats row.
+   Multi-eligibility that existed at the time is therefore unrecoverable from this field: it records
+   what Sleeper believes *now*, for every season you ask about.
+
    Impact by consumer: the label ``y_custom_points`` is **unaffected** (the scoring engine sums
    stat × weight and never reads position); positional replacement level and the sims' per-position
    CVs take a small mislabel rate; DST/K are immune (DEF rows key on the team abbreviation). It bites
@@ -100,6 +106,10 @@ def _fantasy_positions(player: Mapping[str, Any]) -> str | None:
     one rarely-read field; the joined string keeps every lake column flat and greppable. Kept at all
     because it explains rows the position filter otherwise seems to contradict — a FB with
     ``fantasy_positions=["RB"]`` is returned by a ``position[]=RB`` request.
+
+    Same mutable-master caveat as ``position`` (see the module ``.. warning::``): this is today's
+    eligibility for every season you ask about, and it has already collapsed for the players where
+    multi-eligibility mattered most. Do not read it as "what he was eligible at that week".
     """
     values = player.get("fantasy_positions")
     if not isinstance(values, (list, tuple)) or not values:
