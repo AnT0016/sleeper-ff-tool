@@ -18,12 +18,21 @@ dependencies = [
     "pulp>=2.8",
     "streamlit>=1.40",
     "polars>=1.0",
+    # S3-compatible lake backend (store/s3.py, LAKE_BACKEND=s3 -> Backblaze B2). Required rather
+    # than an extra because the collection crons install with a plain `pip install -e .` and would
+    # otherwise resolve LAKE_BACKEND=s3 to an ImportError at 12:00 UTC on a Tuesday. Free, pure
+    # Python, no compiled deps. The hosted dashboard installs from requirements.txt and is unaffected.
+    "boto3>=1.34",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # In-process S3 mock: tests/test_store_s3.py must never touch a real bucket. Chosen over a
+    # localhost moto *server* because it intercepts below botocore, so the tests can assert which
+    # byte ranges were requested -- which is how the cheap-metadata guarantees are actually pinned.
+    "moto[s3]>=5.0",
 ]
 
 # src/ layout: each subdirectory (sleeper, scoring, data, ...) is its own

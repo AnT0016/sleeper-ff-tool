@@ -336,15 +336,24 @@ def test_intended_point_in_time_dedup_never_warns(backend, caplog):
 
 # --------------------------------------------------------------------------- cheap inventory
 class _SpyBackend(LocalParquetBackend):
-    """Records every ``read_parquet`` so a test can prove payload columns were never fetched."""
+    """Records every materializing read so a test can prove what was actually fetched.
+
+    ``reads`` is the payload path (:meth:`read_parquet`); ``opens`` is the footer path
+    (:meth:`open_partition`). The distinction is the whole point of both cheap-read tests below.
+    """
 
     def __init__(self, root):
         super().__init__(root)
         self.reads: list[tuple[str, tuple[str, ...] | None]] = []
+        self.opens: list[str] = []
 
     def read_parquet(self, key, columns=None):
         self.reads.append((key, tuple(columns) if columns is not None else None))
         return super().read_parquet(key, columns)
+
+    def open_partition(self, key):
+        self.opens.append(key)
+        return super().open_partition(key)
 
 
 def test_partition_summary_reports_rows_and_latest_stamp(backend):
@@ -370,6 +379,83 @@ def test_lake_inventory_never_fetches_payload_columns(tmp_path):
     assert inv.loc[0, "n_rows"] == 2
     assert inv.loc[0, "latest_captured_at"] == MON
     assert spy.reads == []  # footer metadata + one column chunk, never a materialized frame
+
+
+# --------------------------------------------------------------------------- projected reads
+# A raw layer's schema drifts: ``sleeper_stats_week`` writes only the stat keys a week actually
+# produced, so a week in which no defence pitched a shutout has no ``pts_allow_0`` column at all.
+# The projection has to survive that *without* degrading into a full read -- measured on the real
+# lake, all 175 sleeper_stats_week partitions lack at least one column the assembler asks for
+# (median 64, max 79), so a try/except-on-failure projection was 175 full reads plus 175 wasted
+# attempts. Locally that is noise; on S3 it is the entire transfer the projection exists to avoid.
+DRIFTED = "sleeper_stats_week"
+
+
+def test_a_projected_read_of_a_drifted_partition_never_falls_back_to_a_full_read(tmp_path):
+    spy = _SpyBackend(tmp_path)
+    _write(spy, [{"player_id": "4046", "pass_yd": 300}], source=DRIFTED)
+    spy.reads.clear()
+    spy.opens.clear()
+
+    df = read_snapshot(
+        DRIFTED, 2026, 1, columns=["player_id", "pts_allow_0"], backend=spy,
+    )
+
+    # The requested shape, with the absent column reindexed to NA rather than raising.
+    assert df.columns.tolist() == ["player_id", "pts_allow_0"]
+    assert df["player_id"].tolist() == ["4046"]
+    assert df["pts_allow_0"].isna().all()
+
+    # ...and it cost no unprojected read. This is the assertion that fails on a try/except design.
+    assert [key for key, columns in spy.reads if columns is None] == []
+    # One footer resolution, not one per attempt: `column_names` and the projected read must share
+    # a handle, or an S3 backend pays two round-trips per partition to save one.
+    assert spy.opens == [partition_key(DRIFTED, 2026, 1)]
+
+
+def test_a_projection_that_matches_the_partition_exactly_still_projects(tmp_path):
+    """Guards the happy path against a fix that "solves" drift by always reading everything."""
+    spy = _SpyBackend(tmp_path)
+    _write(spy, [{"player_id": "4046", "pass_yd": 300, "rec": 4.0}], source=DRIFTED)
+    spy.reads.clear()
+
+    df = read_snapshot(DRIFTED, 2026, 1, columns=["player_id", "rec"], backend=spy)
+
+    assert df.columns.tolist() == ["player_id", "rec"]
+    assert [key for key, columns in spy.reads if columns is None] == []
+
+
+def test_read_source_projects_across_partitions_of_differing_schemas(backend):
+    """Ten seasons of a sparse feed: the union of columns is never present in any one partition."""
+    _write(backend, [{"player_id": "4046", "pass_yd": 300}], source=DRIFTED, week=1)
+    _write(backend, [{"player_id": "9999", "pts_allow_0": 10}], source=DRIFTED, week=2)
+
+    df = read_source(DRIFTED, columns=["player_id", "pass_yd", "pts_allow_0"], backend=backend)
+
+    assert df.columns.tolist() == ["player_id", "pass_yd", "pts_allow_0"]
+    assert len(df) == 2
+    by_player = df.set_index("player_id")
+    assert by_player.loc["4046", "pass_yd"] == 300 and pd.isna(by_player.loc["9999", "pass_yd"])
+    assert by_player.loc["9999", "pts_allow_0"] == 10 and pd.isna(
+        by_player.loc["4046", "pts_allow_0"]
+    )
+
+
+def test_a_projection_of_columns_none_of_which_exist_keeps_the_row_count(backend):
+    """Degenerate but reachable: every requested column absent must still yield N rows of NA."""
+    _write(backend, [{"player_id": "4046"}, {"player_id": "6794"}], source=DRIFTED)
+
+    df = read_snapshot(DRIFTED, 2026, 1, columns=["fgm_50p", "xpm"], backend=backend)
+
+    assert df.columns.tolist() == ["fgm_50p", "xpm"]
+    assert len(df) == 2 and df.isna().all().all()
+
+
+def test_open_partition_exposes_the_footer_without_a_payload_read(backend):
+    _write(backend, _rows(("4046", 21.5), ("6794", 14.0)))
+    with backend.open_partition(partition_key(SOURCE, 2026, 1)) as handle:
+        assert handle.metadata.num_rows == 2
+        assert handle.schema_arrow.names == ["player_id", "proj", *RESERVED]
 
 
 # --------------------------------------------------------------------------- backend selection
