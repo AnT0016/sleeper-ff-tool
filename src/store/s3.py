@@ -20,6 +20,14 @@ A missing value raises :class:`S3ConfigError` at construction. It must never deg
 backend: a cron that silently wrote to a container-local ``data_cache/lake/`` would report success
 every week and accumulate nothing, which is the one failure this phase cannot detect after the fact.
 
+**A mistyped bucket is not an empty lake.** ``head_object`` returns the same bare ``404`` for a
+missing object and a missing *bucket* — HTTP allows no body on a HEAD response, so there is no
+error code to tell them apart (verified against the real Backblaze endpoint; ``moto`` sends a body
+and so appears to distinguish them, which is a trap rather than a guarantee). Left conflated, a typo
+in :data:`BUCKET_ENV` would make every partition read as "never captured". :meth:`S3Backend.exists`
+therefore rules the bucket out with ``head_bucket`` — which discriminates by *succeeding* — before
+reporting anything absent. See :meth:`S3Backend._bucket_is_missing`.
+
 **Atomicity without rename.** Object stores have no rename, so the local backend's
 temp-file-plus-``os.replace`` trick has no analogue. Here "atomic" means the fully merged frame goes
 up in a **single** ``PutObject``: readers see either the old object or the new one, and an
@@ -70,9 +78,11 @@ DEFAULT_REGION = "us-east-1"
 #: footer body — so caching one block turns three round-trips into one.
 TAIL_BYTES = 64 * 1024
 
-#: Error codes S3 implementations use for "no such object". Vendors differ, hence the sets.
+#: Error codes S3 implementations use for "no such object". Vendors differ, hence the set.
 _MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
-#: ...and for "no such *bucket*", which arrives as a 404 too but must never be read as "absent".
+#: ...and for "no such *bucket*". Only ever seen on **body-bearing** responses — a GET such as
+#: ``list_objects_v2`` — never on the ``HEAD`` that :meth:`S3Backend.exists` issues. See
+#: :meth:`S3Backend._bucket_is_missing` for why, and for what is used instead.
 _MISSING_BUCKET_CODES = frozenset({"NoSuchBucket"})
 
 
@@ -102,21 +112,27 @@ def _required(value: str | None, env: str, missing: list[str]) -> str:
     return resolved
 
 
-def _is_missing_object(exc: ClientError) -> bool:
-    """Is this "that object was never captured" — as opposed to a real failure?
+def _error_code(exc: ClientError) -> str:
+    return str(((getattr(exc, "response", None) or {}).get("Error") or {}).get("Code", ""))
 
-    The bucket check comes first and deliberately: S3 answers a ``HEAD`` against a **missing
-    bucket** with a 404 as well, so a status-only test would turn a typo in ``LAKE_S3_BUCKET`` into
-    "every partition is absent" — an empty lake, no error, and a cron that reports success forever.
-    A mistyped bucket must raise.
+
+def _http_status(exc: ClientError) -> int | None:
+    meta = (getattr(exc, "response", None) or {}).get("ResponseMetadata") or {}
+    return meta.get("HTTPStatusCode")
+
+
+def _is_missing_object(exc: ClientError) -> bool:
+    """Is this a 404 for the object? **Not** on its own an answer to "was it never captured".
+
+    A missing *bucket* answers a ``HEAD`` with a 404 too, and — crucially — one this function
+    cannot tell apart; see :meth:`S3Backend._bucket_is_missing`. Callers must rule the bucket out
+    before reading a ``True`` here as "absent".
     """
-    response = getattr(exc, "response", None) or {}
-    code = str(response.get("Error", {}).get("Code", ""))
-    if code in _MISSING_BUCKET_CODES:
+    if _error_code(exc) in _MISSING_BUCKET_CODES:
         return False
-    if code in _MISSING_OBJECT_CODES:
+    if _error_code(exc) in _MISSING_OBJECT_CODES:
         return True
-    return response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404
+    return _http_status(exc) == 404
 
 
 class _S3RangeReader(io.RawIOBase):
@@ -252,6 +268,10 @@ class S3Backend:
         self._client = client if client is not None else self._build_client(
             access_key_id, secret_access_key
         )
+        #: Tri-state, resolved lazily and at most once: ``None`` = not asked yet. Deliberately not
+        #: settled in ``__init__`` — constructing a backend should not require connectivity, and
+        #: the question is only ever interesting once a 404 has actually come back.
+        self._bucket_missing: bool | None = None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"S3Backend(bucket={self.bucket!r}, endpoint={self.endpoint!r})"
@@ -273,13 +293,51 @@ class S3Backend:
         """``s3://bucket/key``. A string, not a ``Path`` — ``Path`` collapses the ``//``."""
         return f"s3://{self.bucket}/{key}"
 
+    def _bucket_is_missing(self) -> bool:
+        """Is the configured bucket itself absent? Asked at most once, then cached.
+
+        ``head_object`` cannot answer this, and the reason is structural rather than a vendor quirk:
+        **HTTP forbids a body on a HEAD response**, so botocore has no ``<Code>NoSuchBucket</Code>``
+        to parse and falls back to synthesizing ``Code = str(status)`` from the status line. A
+        missing bucket and a missing object are therefore byte-identical — both ``404``. Verified
+        against the real Backblaze endpoint::
+
+            missing OBJECT, real bucket:  Error.Code = '404'
+            missing BUCKET (typo):        Error.Code = '404'
+
+        ``moto`` *does* send a body on HEAD, so it returns ``NoSuchBucket`` and an error-code test
+        passes there while production silently reports every partition absent. That is the trap this
+        method exists to close, and it is why the test asserts on the mechanism below rather than on
+        an error code.
+
+        ``head_bucket`` discriminates by **succeeding** — no response-parsing quirk can flatten
+        that. A non-404 failure (a 403 from a key without ``ListBucket``, say) means the bucket is
+        there and something else is wrong, which is not this check's business.
+        """
+        if self._bucket_missing is None:
+            try:
+                self._client.head_bucket(Bucket=self.bucket)
+            except ClientError as exc:
+                self._bucket_missing = (
+                    _http_status(exc) == 404 or _error_code(exc) in _MISSING_BUCKET_CODES
+                )
+            else:
+                self._bucket_missing = False
+        return self._bucket_missing
+
     def exists(self, key: str) -> bool:
         try:
             self._client.head_object(Bucket=self.bucket, Key=key)
         except ClientError as exc:
-            if _is_missing_object(exc):
-                return False
-            raise
+            if not _is_missing_object(exc):
+                raise
+            if self._bucket_is_missing():
+                raise S3ConfigError(
+                    f"{BUCKET_ENV}={self.bucket!r} does not exist at {self.endpoint}. Every "
+                    "partition would otherwise read as 'never captured', leaving an empty lake "
+                    "with nothing raising. Check the bucket name (see docs/b2-setup.md)."
+                ) from exc
+            return False
         return True
 
     def open_partition(self, key: str) -> pq.ParquetFile:

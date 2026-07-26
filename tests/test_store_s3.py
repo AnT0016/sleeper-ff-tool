@@ -41,6 +41,7 @@ from store.lake import (
     write_snapshot,
 )
 from store.s3 import (
+    BUCKET_ENV,
     DEFAULT_REGION,
     TAIL_BYTES,
     S3Backend,
@@ -517,14 +518,99 @@ def test_exists_reports_an_uncaptured_partition_as_absent(s3):
     assert s3.exists(key) is True
 
 
-def test_a_mistyped_bucket_raises_instead_of_looking_like_an_empty_lake(s3_env):
-    """S3 answers HEAD-on-a-missing-bucket with a 404 too, and conflating the two is disastrous:
-    every partition would read as "not captured yet", the crons would report success every week,
-    and the lake would silently stay empty."""
-    typo = S3Backend(bucket="ff-lake-tset")
-    with pytest.raises(ClientError, match="NoSuchBucket|does not exist"):
+class _RealisticHeadClient:
+    """A stub that answers HEAD the way a **real** S3 does, which moto does not.
+
+    HTTP forbids a body on a HEAD response, so botocore has no ``<Code>NoSuchBucket</Code>`` to
+    parse and synthesizes ``Code = str(status)``: a missing bucket and a missing object are both a
+    bare ``404``. moto sends a body anyway and returns ``NoSuchBucket``, so a test written against
+    moto alone cannot distinguish a backend that handles this from one that does not — which is
+    exactly how the first version of this check shipped green and broken.
+
+    Verified against the live Backblaze endpoint before this stub was written:
+    ``head_object`` on a missing object and on a mistyped bucket both return ``Error.Code='404'``,
+    while ``head_bucket`` succeeds on the real bucket and 404s on the typo.
+    """
+
+    def __init__(self, *, bucket_exists: bool) -> None:
+        self.bucket_exists = bucket_exists
+        self.head_bucket_calls = 0
+
+    @staticmethod
+    def _not_found(operation: str) -> ClientError:
+        return ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"},
+             "ResponseMetadata": {"HTTPStatusCode": 404}},
+            operation,
+        )
+
+    def head_object(self, **_kwargs):
+        raise self._not_found("HeadObject")
+
+    def head_bucket(self, **_kwargs):
+        self.head_bucket_calls += 1
+        if not self.bucket_exists:
+            raise self._not_found("HeadBucket")
+        return {}
+
+
+def test_a_missing_bucket_raises_even_though_head_object_only_says_404(s3_env):
+    """The regression. Conflating the two 404s leaves every partition reading "never captured"."""
+    typo = S3Backend(client=_RealisticHeadClient(bucket_exists=False))
+
+    with pytest.raises(S3ConfigError, match="does not exist"):
         typo.exists(partition_key(SOURCE, 2026, 1))
-    with pytest.raises(ClientError, match="NoSuchBucket|does not exist"):
+    # And through the front door: a read must not answer "empty" for a configuration error.
+    with pytest.raises(S3ConfigError, match=BUCKET_ENV):
+        read_snapshot(SOURCE, 2026, 1, backend=typo)
+
+
+def test_a_genuinely_absent_object_still_reads_as_absent(s3_env):
+    """The other half: with the bucket present, the identical 404 must mean what it says."""
+    stub = _RealisticHeadClient(bucket_exists=True)
+    backend = S3Backend(client=stub)
+
+    assert backend.exists(partition_key(SOURCE, 2026, 1)) is False
+    assert read_snapshot(SOURCE, 2026, 1, backend=backend).empty
+
+
+def test_the_bucket_is_verified_once_per_backend_not_once_per_lookup(s3_env):
+    """A backfill checks ``exists`` for every partition; the disambiguation must not ride along."""
+    stub = _RealisticHeadClient(bucket_exists=True)
+    backend = S3Backend(client=stub)
+
+    for week in range(1, 11):
+        assert backend.exists(partition_key(SOURCE, 2026, week)) is False
+    assert stub.head_bucket_calls == 1
+
+
+def test_a_permission_error_on_head_bucket_is_not_read_as_a_missing_bucket(s3_env):
+    """A key without ``ListBucket`` 403s on ``head_bucket`` — the bucket is there, so absent means
+    absent. Treating 403 as "missing" would turn a permissions problem into a hard config error."""
+
+    class Forbidden(_RealisticHeadClient):
+        def head_bucket(self, **kwargs):
+            self.head_bucket_calls += 1
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Forbidden"},
+                 "ResponseMetadata": {"HTTPStatusCode": 403}},
+                "HeadBucket",
+            )
+
+    backend = S3Backend(client=Forbidden(bucket_exists=True))
+    assert backend.exists(partition_key(SOURCE, 2026, 1)) is False
+
+
+def test_a_mistyped_bucket_raises_instead_of_looking_like_an_empty_lake(s3_env):
+    """The same defence end-to-end against moto, whose bucket really does not exist.
+
+    moto reports ``NoSuchBucket`` where production reports a bare 404, so this pins the *outcome*
+    while the tests above pin the *mechanism* that makes the outcome hold on a real endpoint.
+    """
+    typo = S3Backend(bucket="ff-lake-tset")
+    with pytest.raises((S3ConfigError, ClientError), match="NoSuchBucket|does not exist"):
+        typo.exists(partition_key(SOURCE, 2026, 1))
+    with pytest.raises((S3ConfigError, ClientError), match="NoSuchBucket|does not exist"):
         write_snapshot(SOURCE, 2026, _rows(("4046", 21.5)), captured_at=MON, week=1,
                        key_cols=KEY, backend=typo)
 
