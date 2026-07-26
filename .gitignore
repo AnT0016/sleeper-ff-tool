@@ -31,3 +31,7 @@ env/
 data_cache/http_cache.sqlite
 data_cache/http_cache.sqlite-*
 data_cache/nflverse_cache/
+
+# The Phase 8 lake's production store is cloud object storage; data_cache/lake/ is only the local
+# dev/backfill materialization, so it is not committed.
+data_cache/lake/

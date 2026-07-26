@@ -1,7 +1,7 @@
 # Spec: Cloud data collection & feature store (Phase 8)
 
-Status: **draft** — awaiting your sanity-check before issues are created
-Issues: _TBD (one per ticket below, created after this spec is approved)_
+Status: **approved** — tickets filed; ticket 1 in review (PR #10)
+Issues: #1 · #2 · #3 · #4 · #5 · #6 · #7 · #8 · #9 (one per ticket below)
 Owner: you (EM/PM) · Planner: Claude (this session)
 
 ## Goal
@@ -21,14 +21,14 @@ feature-store schema is shaped now to serve all three intended targets (see Non-
   collect, store, and assemble; a `build_training_frame(...)` is the hand-off point.
 - **No new prediction surface** in the dashboard/CLIs. Existing tools keep consuming Sleeper
   projections unchanged until a model is built and validated.
-- **Cloud object storage (Cloudflare R2) is the production store**, behind a `StorageBackend` protocol;
-  local git-committed parquet remains the dev/default backend (flip via one env var). No hosted DB.
-  (Decision log #1.)
+- **Cloud object storage (S3-compatible; Backblaze B2 today) is the production store**, behind a
+  `StorageBackend` protocol; local parquet remains the dev/default backend (flip via one env var). No
+  hosted DB. (Decision log #1.)
 - **No writes to Sleeper**, ever (immutable rule). Collection is read-only GET only.
 - **No secrets in the repo** (immutable rule). All v1 data sources are keyless: Sleeper (no auth),
   nflverse (public releases), open-meteo (no key). A paid odds provider is out of scope for v1. The
-  **only** credentials introduced are the R2 S3 keys, and they live in **GitHub Actions secrets**, never
-  the repo (the playbook explicitly permits Actions/Streamlit secrets).
+  **only** credentials introduced are the B2 S3 keys, and they live in **GitHub Actions secrets** (and
+  the owner's user env locally), never the repo (the playbook explicitly permits Actions secrets).
 - Not replacing `season.db` / `backtest.db` or the existing `refresh.yml`; the lake is additive.
 
 ## Intended model targets (why the schema looks the way it does)
@@ -59,29 +59,36 @@ demand — the lake never stores a "leaked" join.
 ### Two storage backends, one interface (Decision #1)
 All lake I/O goes through a `StorageBackend` protocol so the *where* is a config flip, never a rewrite:
 - **`LocalParquetBackend`** — writes under `data_cache/lake/` (gitignored). The **dev/default** backend;
-  used by local runs, tests, and anyone without R2 creds. No secrets, no account.
-- **`R2Backend`** — Cloudflare R2 (S3-compatible), the **production/cloud** store the cron workflows
-  write to. Free tier (10 GB storage, 1M Class A + 10M Class B ops/mo, zero egress) is far above this
-  project's needs (~<1 GB for a decade). Creds come from env (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-  `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) set as **GitHub Actions secrets** — never committed.
+  used by local runs, tests, and anyone without cloud creds. No secrets, no account.
+- **`S3Backend`** — any S3-compatible object store, **Backblaze B2** today. The **production/cloud**
+  store the cron workflows write to. B2's free tier (10 GB, no credit card required) is far above this
+  project's needs (~<1 GB for a decade). Creds come from env (`LAKE_S3_ENDPOINT`,
+  `LAKE_S3_ACCESS_KEY_ID`, `LAKE_S3_SECRET_ACCESS_KEY`, `LAKE_S3_BUCKET`) set as **GitHub Actions
+  secrets** — never committed.
 
-Backend chosen by `LAKE_BACKEND={local|r2}` (default `local`). R2 is the source of truth for captured
-point-in-time data; a local run can read from R2 (with read creds in the local env) or work off a local
-backfill. **Manual, one-time, done by the owner (cannot be automated — account/payment):** create a
-Cloudflare account → enable R2 (a card is required for verification even on the free tier; no charge
-within limits) → create a bucket → generate an S3 API token → paste the 4 values into repo Actions
-secrets. Until then, `LAKE_BACKEND=local` runs everything, so no ticket is blocked on R2 existing.
+Backend chosen by `LAKE_BACKEND={local|s3}` (default `local`). The bucket is the source of truth for
+captured point-in-time data; a local run can read from it (with creds in the local env) or work off a
+local backfill. Keeping the backend **generic S3 rather than vendor-specific** is the point: moving to
+R2/AWS/Tigris later is one endpoint string, not a rewrite. **Manual, one-time, done by the owner
+(cannot be automated — account creation):** create a Backblaze account **choosing the EU Central region
+at signup** (region is per-account and permanent) → create a private bucket → generate a bucket-scoped
+S3 application key → paste the 4 values into repo Actions secrets. Until then, `LAKE_BACKEND=local`
+runs everything, so no ticket is blocked on the bucket existing.
 
 ### Data flow
 ```
                          ┌─ collect_sleeper_*   ┐
-GitHub Actions cron ──▶  ├─ collect_nflverse_*  ├──▶ store.write_snapshot(...)  ──▶  data_cache/lake/**   ──▶ git commit
- (pre-lock / post-game)  ├─ collect_market_*    │        (append + dedup,                                    (Streamlit-
-                         └─ collect_weather_*   ┘         atomic temp+replace)                                irrelevant)
+GitHub Actions cron ──▶  ├─ collect_nflverse_*  ├──▶ store.write_snapshot(...) ──▶ S3 bucket  (B2, production)
+ (pre-lock Thu+Sun /     ├─ collect_market_*    │      (merge + point-in-time      ── or ──
+  post-game Tue)         └─ collect_weather_*   ┘       dedup, atomic write)       data_cache/lake/ (local dev)
                                                                                           │
-scripts/backfill_lake.py (one-time, workflow_dispatch) ───────────────────────────────────┘
+scripts/backfill_lake.py (one-time, 2016-2025, run locally) ──────────────────────────────┤
                                                                                           │
 dataset.build_training_frame(seasons, asof=...) ◀── reads lake ── enforces lookahead guard ┘  ──▶ (next phase: models)
+
+The lake is never committed to git — the bucket is the production store, and `data_cache/lake/` is a
+gitignored local materialization. (This is the one structural difference from Phase 5's `season.db`,
+which *is* committed because Streamlit Cloud redeploys from it.)
 ```
 
 ### Point-in-time discipline (the whole value)
@@ -145,9 +152,15 @@ def read_snapshot(source: str, season: int, week: int | None = None) -> pd.DataF
 def read_source(source: str, seasons: Iterable[int] | None = None) -> pd.DataFrame     # concat partitions
 def lake_inventory() -> pd.DataFrame  # one row per partition: source, season, week, n_rows, path, latest _captured_at
 ```
-Storage backend is behind a thin `StorageBackend` protocol (`write_parquet`/`read_parquet`/`exists`/
-`list`); `LocalParquetBackend` is the only impl in v1. Swapping to R2/S3 later means one new impl + a
-config toggle, with zero changes to collectors or the assembler.
+Storage backend is behind a thin `StorageBackend` protocol — `write_parquet` / `read_parquet(key,
+columns=None)` / `exists` / `list_keys` / `partition_summary(key) -> (n_rows, latest_captured_at)`;
+`LocalParquetBackend` is the impl ticket 1 ships. Adding the S3 impl (ticket 9) means one new module +
+a config toggle, with zero changes to collectors or the assembler.
+
+`partition_summary` and the `columns=` projection are on the protocol deliberately: `lake_inventory()`
+needs only a row count and one timestamp per partition, and a backend that answered by materializing
+the object would make that call download the entire lake (630 objects for 10 seasons). Locally it is
+the parquet footer plus one column chunk; ticket 9 must keep it equally cheap.
 
 ### Source registry — `src/collect/registry.py`
 ```python
@@ -283,13 +296,14 @@ def lookahead_ok(feature_week: int, feature_captured_at: str, target_week: int, 
 **Project-wide**
 - [ ] Full test suite stays green (currently 124 passed); `ruff` clean on changed files.
 - [ ] No secret added anywhere; no new **required** paid dependency. Any new dep justified in its PR.
-- [ ] `.gitignore` keeps volatile caches ignored; the lake **is** committed. `data_cache/README.md`,
+- [ ] `.gitignore` keeps volatile caches ignored **and** `data_cache/lake/` (the local materialization
+      is not committed; the cloud bucket is the production store). `data_cache/README.md`,
       `docs/PROGRESS.md`, `docs/PLAN.md`, and `CLAUDE.md` updated to describe Phase 8.
 
 ## Tickets (atomic — one PR each)
 Dependency order: **1 → {2,3,4} → 5 → 9 → 6**, with **7** after {2,3,4} and **8** last. Tickets 2/3/4
 all register into the ticket-1 registry, so ticket 1 pins that interface to avoid integration drift.
-Ticket 9 (R2 backend) can land any time after 1; ticket 6 (crons) needs 5 **and** 9.
+Ticket 9 (S3 backend) can land any time after 1; ticket 6 (crons) needs 5 **and** 9.
 
 1. **`store` + source registry** — `src/store/lake.py` (`StorageBackend` protocol +
    `LocalParquetBackend` + `LAKE_BACKEND` selection) and `src/collect/registry.py` with the full
@@ -306,17 +320,18 @@ Ticket 9 (R2 backend) can land any time after 1; ticket 6 (crons) needs 5 **and*
    `scripts/backfill_lake.py` (one-time 2016–2025 pull with `_backfill` marker). Tests on fixtures.
 6. **Cloud crons** — `.github/workflows/collect-prelock.yml` (**two schedules**: Thu ~22:00 UTC before the
    TNF lock + Sun ~15:00 UTC before the 1pm ET main slate) and `collect-postgame.yml` (Tue ~12:00 UTC,
-   before the 18:00 season.db refresh). Both `LAKE_BACKEND=r2` with the 4 R2 secrets; off-season skip,
-   concurrency, timeouts. (No git-commit step — data goes to R2.)
+   before the 18:00 season.db refresh). Both `LAKE_BACKEND=s3` with the 4 `LAKE_S3_*` secrets;
+   off-season skip, concurrency, timeouts. (No git-commit step — data goes to the bucket.)
 7. **Dataset assembler** — `src/dataset/assemble.py` (`build_training_frame` + `lookahead_ok`), reusing
    the Phase 1 scoring engine for the label. Tests: the leak gate (red-first), label correctness,
    one-row-per-key, unjoined logging.
 8. **Docs + conventions** — `docs/data-conventions.md`, `.claude/skills/data-conventions/SKILL.md`, and
    updates to `CLAUDE.md` (Phase 8 + data-conventions block), `docs/PLAN.md`, `docs/PROGRESS.md`,
    `data_cache/README.md`, `.gitignore` (ignore `data_cache/lake/`).
-9. **R2 backend** — `src/store/r2.py` (`R2Backend`, S3-compatible via a to-be-pinned client, e.g.
-   `s3fs`/`boto3`), env-driven creds, and an R2 setup section in `docs/data-conventions.md` + the owner
-   checklist. Tests: backend conforms to the `StorageBackend` protocol (mocked S3; no live calls in CI).
+9. **S3 backend** — `src/store/s3.py` (`S3Backend`, S3-compatible via a to-be-pinned client, e.g.
+   `boto3`/`s3fs`; Backblaze B2 is the configured endpoint), env-driven creds (`LAKE_S3_*`), and a B2
+   setup section in `docs/data-conventions.md` + the owner checklist. Tests: backend conforms to the
+   `StorageBackend` protocol (mocked S3; **no live calls in CI**).
 
 ## Open questions
 - **Q-A (TNF pre-lock):** ✅ RESOLVED — **add a Thursday capture** (ticket 6 pre-lock workflow gets a
@@ -330,23 +345,36 @@ Ticket 9 (R2 backend) can land any time after 1; ticket 6 (crons) needs 5 **and*
   over leaguemates (points / win-probability), not a sportsbook +EV edge.
 
 ## Decision log
-- 2026-07-16 — **Storage = Cloudflare R2 (production) + local parquet (dev), behind a `StorageBackend`
-  protocol.** R2 free tier (10 GB / 1M Class A / 10M Class B ops-mo / zero egress) far exceeds this
-  project's needs; R2 creds live in GitHub Actions secrets (no repo secrets). Local git/parquet stays the
-  default so nothing is blocked before the owner's one-time R2 setup (account + card + bucket + token).
-  Supersedes the initial "git-committed parquet only" lean. (You: "Is R2 free? if it is lets set it up".)
-- 2026-07-16 — **#6 Projection baselines are not backfillable** (no free ex-ante historical projections
+- 2026-07-26 — **Storage = S3-compatible cloud (production) + local parquet (dev), behind a
+  `StorageBackend` protocol.** Creds live in GitHub Actions secrets (no repo secrets); local parquet
+  stays the default so nothing is blocked before the bucket exists. Supersedes the initial
+  "git-committed parquet only" lean.
+- 2026-07-26 — **Vendor = Backblaze B2, not Cloudflare R2** (supersedes the entry above as originally
+  written). Cloudflare requires completing a checkout/payment method to enable R2 even on the free
+  tier; **B2's 10 GB free tier needs no credit card**, which keeps the "no friction, no spend" property
+  the owner asked for. Decisive factor is not storage size (either is ~10× more than a decade of this
+  data) but that **B2 speaks the S3 API**, so the backend is written generic (`S3Backend`,
+  `LAKE_BACKEND=s3`, `LAKE_S3_*` env) and moving to R2/AWS/Tigris later is one endpoint string.
+  Rejected Hugging Face Hub (100 GB free, ML-native, but git/LFS rather than an object store → a
+  bespoke non-portable backend) and GitHub Releases (no new account, but clumsy for the partition
+  read-modify-write this store does). (You: "Is R2 free? if it is lets set it up" → revised after
+  verifying the card requirement.)
+- 2026-07-26 — **B2 region = EU Central (Amsterdam)**, chosen at signup because Backblaze fixes the
+  region **per account, permanently**. Rationale: the heaviest transfers (the 2016–2025 backfill and
+  repeated `build_training_frame` reads during model work) run from the owner's machine in France; the
+  cron writes that would favour a US region are small and unattended.
+- 2026-07-26 — **#6 Projection baselines are not backfillable** (no free ex-ante historical projections
   from Yahoo/ESPN/FantasyPros/nflverse); train on lagged-actuals features, grade the market-beating
   baseline forward from 2026 W1. Additional forward projection sources deferred but registry-ready.
   (You: "can we use any other weekly preds for the backfill?".)
-- 2026-07-16 — **Pre-lock capture runs Thursday + Sunday** (Q-A resolved) so TNF players get a fresh
+- 2026-07-26 — **Pre-lock capture runs Thursday + Sunday** (Q-A resolved) so TNF players get a fresh
   pre-lock snapshot. **Backfill span = 2016–2025** (Q-B resolved).
-- 2026-07-16 — **Schema serves all three model targets** (weekly projections, distribution fitting,
+- 2026-07-26 — **Schema serves all three model targets** (weekly projections, distribution fitting,
   breakout classifier), so one player×week table with usage/role/market/weather + a real re-scored label.
   (You: "all?".)
-- 2026-07-16 — **Scope includes Vegas + weather**, sourced free/keyless (Vegas from nflverse schedules;
+- 2026-07-26 — **Scope includes Vegas + weather**, sourced free/keyless (Vegas from nflverse schedules;
   weather from open-meteo), preserving the no-secrets rule. (You: "Also add Vegas + weather".)
-- 2026-07-16 — **Two capture cadences**: pre-lock (Sun AM) for point-in-time projections/injuries/odds/
+- 2026-07-26 — **Two capture cadences**: pre-lock (Sun AM) for point-in-time projections/injuries/odds/
   weather, post-game (Tue) for actuals/usage. (You: "Add a pre-lock capture".)
-- 2026-07-16 — **Read-only + no-secrets preserved**; collection is GET-only against Sleeper/nflverse, and
+- 2026-07-26 — **Read-only + no-secrets preserved**; collection is GET-only against Sleeper/nflverse, and
   every v1 source is keyless (upholds the two immutable rules in CLAUDE.md).
