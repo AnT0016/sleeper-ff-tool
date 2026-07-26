@@ -36,7 +36,10 @@ except Exception:
 # `python scripts/collect.py` puts scripts/ at the FRONT of sys.path, where this file shadows the
 # installed `collect` package — the one holding the runner below, and the one backfill_lake.py
 # imports. Drop the script directory: nothing in scripts/ imports a sibling script.
-if sys.path and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
+# The `sys.path[0]` truthiness check matters: an empty entry means "the cwd", and resolving it would
+# match this test whenever the cwd happens to be scripts/ — dropping the cwd rather than the script
+# directory.
+if sys.path and sys.path[0] and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
     del sys.path[0]
 
 from collect import runner
@@ -64,8 +67,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         state = {}
 
     try:
+        # ImportError too: plan_run imports analysis.snapshot lazily (it drags in the whole
+        # optimizer/pulp stack), so a broken install there would otherwise escape as a traceback
+        # rather than the actionable one-liner a cron log wants.
         plan = runner.plan_run(state, season=args.season, week=args.week)
-    except ValueError as exc:
+    except (ValueError, ImportError) as exc:
         # A scheduled run must never guess the week: the forward-only sources would be filed under
         # the wrong partition, and that week is then gone for good. Fail red so the cron surfaces it.
         print(f"aborting the {args.mode} capture — {exc}", file=sys.stderr)

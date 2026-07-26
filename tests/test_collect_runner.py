@@ -239,10 +239,55 @@ def test_a_run_is_a_failure_only_when_every_capture_failed(offline, lake, monkey
 )
 def test_exit_code_rule(errors, expected):
     results = [
-        runner.CaptureResult("s", SEASON, None, error="boom" if failed else None)
+        runner.CaptureResult("nflverse_snaps", SEASON, None, error="boom" if failed else None)
         for failed in errors
     ]
     assert runner.exit_code(results) == expected
+
+
+def test_a_lost_forward_only_capture_fails_the_run_on_its_own(offline, lake, monkeypatch, caplog):
+    """The one failure no backfill undoes must be able to turn the cron red by itself.
+
+    Sleeper serves only the *latest* projections, so a pre-lock capture that does not happen is gone
+    for good. Under a pure all-or-nothing rule that loss is invisible: the other six sources succeed
+    and the run is green.
+    """
+    def boom(*args, **kwargs):
+        raise ConnectionError("sleeper projections timed out")
+
+    monkeypatch.setattr(client, "get_projections", boom)
+    with caplog.at_level(logging.ERROR, logger="collect.runner"):
+        results = runner.run_cadence("prelock", SEASON, WEEK, captured_at=CAPTURED_AT)
+
+    failed = [r.source for r in results if not r.ok]
+    assert failed == ["sleeper_proj_week"]
+    assert runner.exit_code(results) == 1
+    assert "unrecoverable" in caplog.text
+    # Still best-effort: everything recoverable was captured anyway, which is the whole point of
+    # reporting the loss rather than aborting on it.
+    assert all(r.ok and r.rows > 0 for r in results if r.source != "sleeper_proj_week")
+    assert len(_partitions(lake)) == len(results) - 1
+
+
+def test_a_lost_backfillable_capture_leaves_the_run_green(offline, lake, monkeypatch):
+    """The counterweight: nflverse is recoverable, so a release hiccup is not a failed run."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("nflverse release is unreachable")
+
+    monkeypatch.setattr(nflverse_data, "load_injuries", boom)
+    results = runner.run_cadence("prelock", SEASON, WEEK, captured_at=CAPTURED_AT)
+    assert [r.source for r in results if not r.ok] == ["nflverse_injuries"]
+    assert runner.exit_code(results) == 0
+
+
+def test_only_the_sleeper_projections_are_forward_only():
+    """Pins what the exit rule is actually about, so adding a source re-decides it deliberately."""
+    forward_only = {name for name in SOURCES if runner._is_forward_only(name)}
+    assert forward_only == {"sleeper_proj_week", "sleeper_proj_season"}
+    # A backfill run therefore cannot trip the rule: none of its sources qualify.
+    assert not forward_only & {s.name for s in backfillable_sources()}
+    # An unregistered name is not treated as unrecoverable (format_summary groups on the raw string).
+    assert not runner._is_forward_only("not_a_source")
 
 
 def test_an_empty_capture_is_a_success_that_wrote_nothing(offline, lake, monkeypatch):
@@ -317,6 +362,14 @@ def test_the_backfill_loads_each_seasons_schedule_once(offline, lake):
     seasons = (2023, 2024, 2025)
     runner.run_backfill(seasons, captured_at=CAPTURED_AT)
     assert offline["schedules"] == len(seasons)
+
+
+def test_the_run_context_repr_does_not_dump_the_schedule(offline):
+    """A context that renders its payload turns any log line or traceback into a data dump."""
+    ctx = runner.RunContext()
+    ctx.schedules(SEASON)
+    assert "_frame" not in repr(ctx)
+    assert len(repr(ctx)) < 200
 
 
 def test_the_schedule_frame_is_shared_not_copied_per_consumer(offline):
@@ -418,6 +471,81 @@ def test_the_live_crosswalk_master_is_pulled_once_for_the_whole_run(offline, lak
     """It is not a per-season archive: N seasons would re-download it N times into one partition."""
     runner.run_backfill([2023, 2024, SEASON], captured_at=CAPTURED_AT, sources=["id_crosswalk"])
     assert offline["crosswalk"] == 1
+
+
+def test_a_failed_season_invariant_capture_is_retried_on_the_next_season(offline, lake, monkeypatch):
+    """Marked done from the *results*, not the plan.
+
+    Marked at plan time, one transient error on the first season of a ten-season run costs the whole
+    run its crosswalk — and says nothing, because the other sources succeed and the exit code is 0.
+    """
+    attempts: list[int] = []
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        attempts.append(calls["n"])
+        if calls["n"] == 1:
+            raise RuntimeError("ffverse release is unreachable")
+        return pl.read_parquet(NFLVERSE / "id_crosswalk.parquet")
+
+    monkeypatch.setattr(nflverse_data, "load_id_crosswalk", flaky)
+    results = runner.run_backfill(
+        [2023, 2024, SEASON], captured_at=CAPTURED_AT, sources=["id_crosswalk"]
+    )
+
+    # Retried on 2024, succeeded, and then *not* attempted again for 2025.
+    assert len(attempts) == 2
+    assert [r.ok for r in results] == [False, True]
+    assert not read_snapshot("id_crosswalk", CROSSWALK_SEASON).empty
+
+
+def test_a_subset_that_reaches_none_of_the_seasons_raises(offline, lake):
+    """``parse_sources`` validates names, not reach — so this used to be a silent green no-op.
+
+    ``--sources nflverse_depth --seasons 2016-2024`` passed every check, wrote nothing, and printed
+    a success banner. A one-time backfill that reports success is expensive to disbelieve.
+    """
+    with pytest.raises(ValueError, match="backfills from 2025"):
+        runner.run_backfill(
+            [2016, LEGACY_DEPTH_SEASON], captured_at=CAPTURED_AT, sources=["nflverse_depth"]
+        )
+    assert _partitions(lake) == []
+
+
+def test_partial_reach_runs_the_seasons_it_can_and_skips_the_rest(offline, lake):
+    """A subset reaching *some* seasons runs those and skips the others before spending anything."""
+    results = runner.run_backfill(
+        [LEGACY_DEPTH_SEASON, SEASON], captured_at=CAPTURED_AT, sources=["nflverse_depth"]
+    )
+    assert [(r.season, r.ok) for r in results] == [(SEASON, True)]
+
+
+def test_dropping_the_eager_load_does_not_cost_the_sharing(offline, lake):
+    """``nflverse_schedules`` + ``vegas_odds`` are both season-level, so nothing loads at plan time.
+
+    They then reach ``ctx.schedules`` from inside their own thunks — and must still land on the same
+    cached frame. This is the review constraint the plan-time skip is most likely to quietly undo.
+    """
+    results = runner.run_backfill(
+        [SEASON], captured_at=CAPTURED_AT, sources=["nflverse_schedules", "vegas_odds"]
+    )
+    assert [r.ok for r in results] == [True, True]
+    assert offline["schedules"] == 1
+
+
+def test_a_backfill_with_no_week_partitioned_source_downloads_no_schedule(offline, lake):
+    """The schedule is planning input for the week fan-out, nothing else.
+
+    ``nflverse_player_week`` returns a whole season at once, so a run of it alone needs no weeks —
+    and the schedule-consuming collectors load lazily inside their own thunk. Ten seasons of this
+    used to cost ten schedule downloads that nothing read.
+    """
+    runner.run_backfill(
+        [2023, 2024, SEASON], captured_at=CAPTURED_AT, sources=["nflverse_player_week"]
+    )
+    assert offline["schedules"] == 0
+    assert offline["player_week"] == 3
 
 
 def test_the_backfill_walks_every_season_it_is_given(offline, lake):
@@ -529,6 +657,21 @@ def test_collect_cli_aborts_rather_than_guess_the_week(offline, lake, monkeypatc
     assert _partitions(lake) == []
 
 
+def test_collect_cli_reports_a_broken_install_rather_than_a_traceback(offline, lake, monkeypatch):
+    """``plan_run`` imports ``analysis.snapshot`` lazily — the whole optimizer/pulp stack.
+
+    A cron log wants the actionable one-liner, not a stack trace from an import three layers down.
+    """
+    cli = _load_cli("collect")
+    monkeypatch.setattr(cli.client, "get_state", lambda *a, **k: {})
+    monkeypatch.setattr(
+        cli.runner, "plan_run",
+        lambda *a, **k: (_ for _ in ()).throw(ImportError("No module named 'pulp'")),
+    )
+    assert cli.main(["--mode", "prelock"]) == 1
+    assert _partitions(lake) == []
+
+
 def test_collect_cli_honours_an_explicit_season_and_week(offline, lake, monkeypatch):
     cli = _load_cli("collect")
     monkeypatch.setattr(cli.client, "get_state", lambda *a, **k: {})
@@ -548,6 +691,13 @@ def test_backfill_cli_rejects_a_forward_only_source(offline, lake, capsys):
     cli = _load_cli("backfill_lake")
     assert cli.main(["--seasons", "2020", "--sources", "sleeper_proj_week"]) == 2
     assert _partitions(lake) == []
+
+
+def test_backfill_cli_reports_an_unreachable_subset_rather_than_success(offline, lake, capsys):
+    cli = _load_cli("backfill_lake")
+    assert cli.main(["--seasons", "2016-2024", "--sources", "nflverse_depth"]) == 2
+    assert _partitions(lake) == []
+    assert "backfills from 2025" in capsys.readouterr().err
 
 
 def test_backfill_cli_defaults_to_the_spec_span():

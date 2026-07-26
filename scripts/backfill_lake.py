@@ -35,8 +35,9 @@ except Exception:
     pass
 
 # scripts/ goes to the front of sys.path when this file is run directly, and scripts/collect.py
-# shadows the `collect` package the runner lives in. Drop the script directory.
-if sys.path and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
+# shadows the `collect` package the runner lives in. Drop the script directory. (The truthiness
+# check keeps an empty entry — which means the cwd — from matching when the cwd is scripts/.)
+if sys.path and sys.path[0] and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
     del sys.path[0]
 
 from collect import runner
@@ -76,7 +77,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{'all backfillable sources' if sources is None else ','.join(sources)} "
         f"(captured_at {captured_at}, backend {LAKE_BACKEND})"
     )
-    results = runner.run_backfill(seasons, captured_at=captured_at, sources=sources)
+    try:
+        results = runner.run_backfill(seasons, captured_at=captured_at, sources=sources)
+    except ValueError as exc:
+        # Raised only by the plan (a --sources subset that reaches none of --seasons); a collector
+        # that raises is caught per task and never reaches here.
+        print(f"nothing to collect - {exc}", file=sys.stderr)
+        return 2
+
     print(runner.format_summary(results))
     return runner.exit_code(results)
 

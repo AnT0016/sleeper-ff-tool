@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
@@ -87,7 +87,9 @@ class RunContext:
 
     load_schedules: Loader | None = None
     _season: int | None = None
-    _frame: pl.DataFrame | None = None
+    #: ``repr=False`` for the same reason ``Collected.rows`` has it: this is a 272-row frame, and a
+    #: context that renders its payload turns any log line or traceback into a data dump.
+    _frame: pl.DataFrame | None = field(default=None, repr=False)
 
     def schedules(self, season: int) -> pl.DataFrame:
         """The season's schedule, loaded at most once per season."""
@@ -159,7 +161,10 @@ def _injuries(season: int, week: int | None, ctx: RunContext) -> Collected:
 
 def _schedules(season: int, week: int | None, ctx: RunContext) -> Collected:
     # Hand the collector the frame the context already holds, rather than let it load its own.
-    return collect_nflverse.collect_schedules(season, load=lambda _season: ctx.schedules(season))
+    # ``ctx.schedules`` *is* a loader (``season -> frame``), so it goes straight in: a lambda that
+    # closed over ``season`` and ignored its argument would silently win any disagreement with the
+    # collector about which season it is loading.
+    return collect_nflverse.collect_schedules(season, load=ctx.schedules)
 
 
 def _depth_charts(season: int, week: int | None, ctx: RunContext) -> Collected:
@@ -374,42 +379,88 @@ def run_backfill(
 ) -> list[CaptureResult]:
     """Pull every backfillable source for ``seasons`` once, marked ``_backfill=True``.
 
-    Per season: load the schedule (once), take the weeks from it, then walk the sources whose
-    history actually reaches that season — ``Source.backfills_season``, which is what keeps
-    ``nflverse_depth`` out of 2016-2024 instead of writing nine empty partitions there.
+    Per season: pick the sources whose history actually reaches it (``Source.backfills_season``,
+    which is what keeps ``nflverse_depth`` out of 2016-2024 instead of writing nine empty partitions
+    there), then load the schedule *once* and take the weeks from it.
+
+    The selection happens **before** the schedule load so a season with nothing to collect costs no
+    download at all, and a ``sources`` subset that reaches none of ``seasons`` raises instead of
+    reporting a successful run that wrote nothing.
     """
     ctx = ctx or RunContext()
     results: list[CaptureResult] = []
     done_invariant: set[str] = set()
+    planned_any = False
 
     for season in (int(s) for s in seasons):
-        try:
-            schedules = ctx.schedules(season)
-        except Exception as exc:  # noqa: BLE001 - a missing schedule must not skip the season
-            _LOG.warning(
-                "schedules %s could not be loaded (%s: %s) — falling back to a static week range; "
-                "vegas_odds and weather will report their own failure",
-                season, type(exc).__name__, exc,
-            )
-            schedules = None
-        weeks = regular_season_weeks(season, schedules)
-
         selected = [
             s for s in _selected(backfillable_sources(season), sources)
             if s.name not in done_invariant
         ]
-        done_invariant |= {s.name for s in selected if s.name in _SEASON_INVARIANT}
+        if not selected:
+            _LOG.info("backfill %s: nothing left to collect for this season - skipping it", season)
+            continue
+        planned_any = True
+
+        # The eager load exists *only* to fan the week-partitioned sources out over real weeks:
+        # ``_schedules`` / ``_vegas`` / ``_weather`` all call ``ctx.schedules`` inside their own
+        # thunk, so a season with no per-week source in the selection needs no schedule at plan
+        # time — and downloading one anyway is ten wasted requests on a targeted backfill.
+        weeks: tuple[int, ...] = ()
+        if any(COLLECTORS[s.name][0] for s in selected if s.name in COLLECTORS):
+            try:
+                schedules = ctx.schedules(season)
+            except Exception as exc:  # noqa: BLE001 - a missing schedule must not skip the season
+                _LOG.warning(
+                    "schedules %s could not be loaded (%s: %s) - falling back to a static week "
+                    "range; vegas_odds and weather will report their own failure",
+                    season, type(exc).__name__, exc,
+                )
+                schedules = None
+            weeks = regular_season_weeks(season, schedules)
+
         tasks = plan_tasks(selected, season, weeks, ctx)
         _LOG.info(
             "backfill %s: %d source(s), weeks %s-%s, %d task(s)",
             season, len(selected), weeks[0] if weeks else "-", weeks[-1] if weeks else "-",
             len(tasks),
         )
-        results.extend(
-            run_tasks(tasks, captured_at=captured_at, backfill=True, backend=backend)
-        )
+        season_results = run_tasks(tasks, captured_at=captured_at, backfill=True, backend=backend)
+        results.extend(season_results)
+        # Marked done from the *results*, not from the plan: a season-invariant source that failed
+        # has not been collected, and skipping it for every later season would mean one transient
+        # error on 2016 costs a ten-season run the crosswalk entirely — silently, since the other
+        # sources succeed and the run exits 0.
+        done_invariant |= {
+            r.source for r in season_results if r.ok and r.source in _SEASON_INVARIANT
+        }
         ctx.release()
+
+    if not planned_any and sources is not None:
+        raise ValueError(_unreachable_message(sources, seasons))
     return results
+
+
+def _unreachable_message(sources: Iterable[str], seasons: Sequence[int]) -> str:
+    """Why a ``--sources``/``--seasons`` pair collects nothing — the silent-success trap.
+
+    ``parse_sources`` validates the *names* and rejects forward-only ones, but it knows nothing about
+    seasons, so ``--sources nflverse_depth --seasons 2016-2024`` passed every check and then wrote
+    nothing while reporting success. A one-time backfill that says it worked is expensive to
+    disbelieve, so say exactly which source starts when.
+    """
+    wanted = [n for n in sources]
+    spans = ", ".join(
+        f"{n} backfills from {SOURCES[n].backfillable_from}"
+        for n in wanted
+        if n in SOURCES and SOURCES[n].backfillable_from is not None
+    )
+    span = f"{min(seasons)}-{max(seasons)}" if seasons else "(no seasons)"
+    return (
+        f"none of the requested source(s) {wanted} can be backfilled for season(s) {span}"
+        + (f" - {spans}" if spans else "")
+        + "; refusing to report a successful run that collected nothing"
+    )
 
 
 # --------------------------------------------------------------------------- CLI helpers
@@ -502,11 +553,40 @@ def parse_sources(text: str | None, *, backfill: bool = False) -> tuple[str, ...
     return names
 
 
+def _is_forward_only(source: str) -> bool:
+    """Is a lost capture of ``source`` lost *for good*? (An unregistered name is not.)"""
+    entry = SOURCES.get(source)
+    return entry is not None and not entry.backfillable
+
+
 def exit_code(results: Sequence[CaptureResult]) -> int:
-    """``1`` only when every capture failed — one flaky provider is not a failed run."""
+    """``1`` when every capture failed, **or** when a forward-only one did.
+
+    One flaky provider is not a failed run — that is what makes the best-effort loop worth having.
+    But a forward-only source is different in kind: Sleeper's projection endpoints serve only the
+    latest numbers, so a pre-lock capture that does not happen is gone and no backfill recovers it.
+    Under an all-or-nothing rule that is exactly the failure the exit status cannot express: six
+    sources succeed, ``sleeper_proj_week`` raises, the cron is green, and the week nobody can rebuild
+    is the week nobody was told about. GitHub Actions surfaces red runs and nothing else, so the one
+    permanent loss has to be able to turn the run red on its own.
+
+    Recoverable failures stay green *and stay visible* — :func:`format_summary` reports every one of
+    them per source, and :func:`run_tasks` logs each with a traceback.
+    """
     if not results:
         return 0
-    return 1 if all(not r.ok for r in results) else 0
+    if all(not r.ok for r in results):
+        return 1
+    lost = sorted({r.source for r in results if not r.ok and _is_forward_only(r.source)})
+    if lost:
+        _LOG.error(
+            "forward-only source(s) %s failed to capture - those rows are unrecoverable (the "
+            "endpoints serve only the latest values), so this run is a failure even though the "
+            "other sources succeeded",
+            lost,
+        )
+        return 1
+    return 0
 
 
 def format_summary(results: Sequence[CaptureResult]) -> str:
