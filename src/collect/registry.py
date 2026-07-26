@@ -166,15 +166,20 @@ _REGISTRY: tuple[Source, ...] = (
         backfillable=True,
     ),
     # Weekly injury report. Point-in-time: the same player-week is re-captured as the report firms
-    # up through the week, and each day's capture is kept.
-    # date_modified is the report *revision* and belongs in the key: a player is commonly listed
-    # twice in one week (e.g. Questionable early, Out after the final practice), and without it the
-    # two revisions collapse into whichever the provider happened to list last — persisting a stale
-    # status. Verified against real 2024 data: 0 duplicates with it, silent row loss without it.
+    # up through the week, and each day's capture is kept -- Thursday's Questionable and Sunday's Out
+    # are two rows because their capture dates differ, which is the revision stream that matters.
+    # This key used to carry date_modified, on the stated grounds that "a player is commonly listed
+    # twice in one week". Measured on the real feed, that is 2 player-weeks out of 6,213 in 2024
+    # (0.03%) -- the row loss #12 found was real but tiny, not systemic. nflverse then dropped
+    # date_modified entirely in the 2025 release, making the source uncapturable from 2025 on. So the
+    # key is the player-week itself: unique in both eras (6,213/6,213 and 6,068/6,068), zero
+    # null/blank gsis_id in 2016/2020/2024/2025. date_modified survives as a payload column where the
+    # feed has it, and collect_injuries ranks on it so a legacy collapse keeps the *final* pre-game
+    # report rather than whichever row the provider happened to list last.
     _source(
         "nflverse_injuries",
         "week",
-        ("gsis_id", "game_type", "week", "date_modified"),
+        ("gsis_id", "game_type", "week"),
         ("prelock", "backfill"),
         backfillable=True,
     ),
