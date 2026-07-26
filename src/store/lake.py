@@ -78,16 +78,36 @@ class StorageBackend(Protocol):
     on both. Implementations are responsible for making :meth:`write_parquet` atomic.
     """
 
-    def path_for(self, key: str) -> Path:
-        """A displayable locator for ``key``. A real filesystem path only for local backends."""
+    def path_for(self, key: str) -> Path | str:
+        """A displayable locator for ``key``.
+
+        A real filesystem path only for local backends — an object store returns its URI
+        (``s3://bucket/key``), which is not expressible as a :class:`~pathlib.Path` (``//``
+        collapses). Callers may only ``str()`` it; anything path-shaped is local-backend territory.
+        """
 
     def exists(self, key: str) -> bool:
         ...
 
-    def read_parquet(self, key: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
-        """``key`` as a frame. ``columns`` projects — a backend must not fetch the rest."""
+    def open_partition(self, key: str) -> pq.ParquetFile:
+        """A **footer-first** handle on ``key``: schema and row count with no payload fetched.
 
-    def write_parquet(self, key: str, df: pd.DataFrame) -> Path:
+        Parquet metadata lives in a footer, so a backend that can serve byte ranges answers
+        ``schema_arrow.names`` / ``metadata.num_rows`` from a tail read alone, and
+        :meth:`~pyarrow.parquet.ParquetFile.read` then pulls only the requested column chunks.
+        Handing back the *handle* rather than the answers is what lets :func:`_read_projected`
+        resolve which columns exist and read them over **one** open — see its docstring for why the
+        alternative costs a round-trip per partition.
+        """
+
+    def read_parquet(self, key: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
+        """``key`` as a frame. ``columns`` projects — a backend must not fetch the rest.
+
+        Every name in ``columns`` must exist in the partition; tolerating drift is
+        :func:`_read_projected`'s job, and doing it here would hide a genuine typo.
+        """
+
+    def write_parquet(self, key: str, df: pd.DataFrame) -> Path | str:
         """Persist ``df`` at ``key`` atomically; returns the locator written."""
 
     def list_keys(self, prefix: str = "") -> list[str]:
@@ -101,6 +121,22 @@ class StorageBackend(Protocol):
         by materializing the object would silently turn :func:`lake_inventory` — a call whose name
         promises it is cheap — into a download of the entire lake.
         """
+
+
+def partition_summary_from(handle: pq.ParquetFile) -> tuple[int, str]:
+    """``(n_rows, latest _captured_at)`` from an open footer handle — the backend-agnostic half.
+
+    The row count is pure footer metadata (no row group is decoded) and the stamp costs exactly one
+    column chunk. Both backends delegate here so "cheap" cannot quietly drift apart between them.
+    """
+    n_rows = int(handle.metadata.num_rows)
+    if "_captured_at" not in handle.schema_arrow.names:
+        return n_rows, ""
+    stamps = [
+        s for s in handle.read(columns=["_captured_at"]).column("_captured_at").to_pylist() if s
+    ]
+    # Stamps are normalized to '...+00:00' on write, so max() over the strings is chronological.
+    return n_rows, (max(stamps) if stamps else "")
 
 
 class LocalParquetBackend:
@@ -127,16 +163,12 @@ class LocalParquetBackend:
             self.path_for(key), columns=list(columns) if columns is not None else None
         )
 
+    def open_partition(self, key: str) -> pq.ParquetFile:
+        return pq.ParquetFile(self.path_for(key))
+
     def partition_summary(self, key: str) -> tuple[int, str]:
-        handle = pq.ParquetFile(self.path_for(key))
-        n_rows = int(handle.metadata.num_rows)  # footer metadata: no row group is decoded
-        if "_captured_at" not in handle.schema_arrow.names:
-            return n_rows, ""
-        stamps = [
-            s for s in handle.read(columns=["_captured_at"]).column("_captured_at").to_pylist() if s
-        ]
-        # Stamps are normalized to '...+00:00' on write, so max() over the strings is chronological.
-        return n_rows, (max(stamps) if stamps else "")
+        with self.open_partition(key) as handle:
+            return partition_summary_from(handle)
 
     def write_parquet(self, key: str, df: pd.DataFrame) -> Path:
         path = self.path_for(key)
@@ -185,8 +217,12 @@ def get_backend(name: str | None = None) -> StorageBackend:
         # name we haven't seen gets one import attempt before it's called unknown.
         try:
             importlib.import_module(f"{__package__}.{key}")
-        except ImportError:
-            pass
+        except ModuleNotFoundError as exc:
+            # Only "there is no such backend module" is a miss. A backend module that exists but
+            # can't import its *client* library (store.s3 without boto3) must surface that, or the
+            # operator is told "unknown backend s3" and goes looking in the wrong place entirely.
+            if exc.name != f"{__package__}.{key}":
+                raise
     if key not in _BACKENDS:
         raise ValueError(
             f"unknown LAKE_BACKEND {name!r}; available: {sorted(_BACKENDS)}. "
@@ -215,8 +251,12 @@ def partition_key(source: str, season: int, week: int | None = None) -> str:
 
 def snapshot_path(
     source: str, season: int, week: int | None = None, *, backend: StorageBackend | None = None
-) -> Path:
-    """Where a partition lives on the active backend."""
+) -> Path | str:
+    """Where a partition lives on the active backend.
+
+    A :class:`~pathlib.Path` on the local backend, an ``s3://…`` URI string on a cloud one — see
+    :meth:`StorageBackend.path_for`. Treat it as displayable, not as something to ``open()``.
+    """
     return _resolve(backend).path_for(partition_key(source, season, week))
 
 
@@ -347,7 +387,7 @@ def write_snapshot(
     week: int | None = None,
     key_cols: Sequence[str],
     backend: StorageBackend | None = None,
-) -> Path:
+) -> Path | str:
     """Merge ``rows`` into one partition, point-in-time deduped, written atomically.
 
     ``key_cols`` is the row's natural key *within this source* (see ``collect.registry.SOURCES``);
@@ -414,25 +454,40 @@ def _read_projected(
     (nflverse dropped ``injuries.date_modified`` in 2025, and rewrote the depth feed entirely), so a
     hard failure would make a ten-season read impossible for any column that has not always
     existed. A missing column comes back as all-NA, which is what a reader would have had to
-    reindex to anyway. The retry costs a full read, so it only fires on the partitions that drifted.
+    reindex to anyway.
+
+    **Why the intersection is resolved from the footer rather than by catching a failed read.** The
+    obvious shape — try the projection, fall back to a full read on error — quietly becomes a full
+    read for any *routinely* sparse source. Measured on the real lake against the exact column set
+    the assembler asks ``sleeper_stats_week`` for, **175 of 175 partitions** took the fallback
+    (median 64 columns missing, max 79), because Sleeper writes only the stat keys a week actually
+    produced: a week in which no defence pitched a shutout has no ``pts_allow_0`` column at all.
+    That is the widest-fanned source in the lake, and on an object store the fallback is a full
+    object download *plus* a wasted round-trip on the attempt that failed — precisely the transfer
+    the projection exists to avoid. Reading the footer first costs one tail read (which opening the
+    partition pays anyway) and makes the projection real on every backend.
+
+    The handle is opened **once**: schema resolution and the read share it, so a cloud backend pays
+    one round-trip per partition, not one to ask and another to fetch.
     """
     if columns is None:
         return store.read_parquet(key)
     wanted = list(dict.fromkeys(columns))
-    try:
-        return store.read_parquet(key, columns=wanted)
-    except Exception:  # noqa: BLE001 - every engine spells "no such column" differently
-        part = store.read_parquet(key)
-        missing = [c for c in wanted if c not in part.columns]
-        # DEBUG, not INFO: for a sparse stat feed this is routine rather than notable.
-        # ``sleeper_stats_week`` writes only the keys a week actually produced, so a week in which
-        # no defence pitched a shutout has no ``pts_allow_0`` column at all — logging that per
-        # partition would be 180 lines on a ten-season read and would teach the reader to skim.
-        _LOG.debug(
-            "%s: column(s) %s absent from this partition — returning them as NA (a raw layer's "
-            "schema drifts across seasons)", key, missing,
-        )
-        return part.reindex(columns=wanted)
+    with store.open_partition(key) as handle:
+        present = set(handle.schema_arrow.names)
+        hit = [c for c in wanted if c in present]
+        # An empty `hit` still yields the partition's row count (an Arrow table keeps num_rows with
+        # no columns selected), so reindexing below gives N rows of NA rather than an empty frame.
+        part = handle.read(columns=hit).to_pandas()
+    if len(hit) == len(wanted):
+        return part
+    # DEBUG, not INFO: for a sparse stat feed this is routine rather than notable. Logging it per
+    # partition would be 180 lines on a ten-season read and would teach the reader to skim.
+    _LOG.debug(
+        "%s: column(s) %s absent from this partition — returning them as NA (a raw layer's "
+        "schema drifts across seasons)", key, [c for c in wanted if c not in present],
+    )
+    return part.reindex(columns=wanted)
 
 
 def read_snapshot(

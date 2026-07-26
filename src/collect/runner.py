@@ -221,13 +221,19 @@ class Task:
 
 @dataclass(frozen=True)
 class CaptureResult:
-    """What one task did. Holds counts and a path — never the rows, which are released on write."""
+    """What one task did. Holds counts and a locator — never the rows, released on write.
+
+    ``path`` is whatever the active backend calls the partition it wrote: a filesystem
+    :class:`~pathlib.Path` locally, an ``s3://bucket/key`` string on the cloud backend (an S3 URI
+    is not expressible as a ``Path`` — the ``//`` collapses). Only ``str()`` it; anything
+    path-shaped is local-backend territory.
+    """
 
     source: str
     season: int
     week: int | None
     rows: int = 0
-    path: Path | None = None
+    path: Path | str | None = None
     error: str | None = None
 
     @property
@@ -266,7 +272,7 @@ def plan_tasks(
 
 def _persist(
     capture: Collected, *, captured_at: str, backfill: bool, backend: StorageBackend | None
-) -> Path:
+) -> Path | str:
     """Stamp the provenance marker and hand the capture to the store.
 
     Season and week come from the :class:`~collect.base.Collected` envelope rather than from the

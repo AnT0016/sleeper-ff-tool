@@ -157,7 +157,11 @@ def test_postgame_writes_every_registered_postgame_partition(offline, lake, capl
 
     assert {r.source for r in results} == {s.name for s in sources_for_cadence("postgame")}
     assert all(r.ok for r in results), [r.error for r in results if not r.ok]
-    assert all(r.rows > 0 and r.path is not None and r.path.is_file() for r in results)
+    assert all(r.rows > 0 and r.path is not None for r in results)
+    # `lake` is a LocalParquetBackend, so the locator really is a filesystem path. On the S3
+    # backend it is an `s3://bucket/key` string and only `str()` of it means anything -- hence the
+    # local-only assertion rather than one on `CaptureResult.path` in general.
+    assert all(Path(r.path).is_file() for r in results)
     assert runner.exit_code(results) == 0
     # A capture with no partition on disk would still "succeed" — check the store really has them.
     assert len(_partitions(lake)) == len(results)
