@@ -8,9 +8,10 @@ latest** numbers, so a week's pre-lock projection is unrecoverable the moment th
 **Nothing is scored here.** Rows carry the provider's raw stat keys and values verbatim — including
 Sleeper's own preset ``pts_half_ppr`` / ``pts_ppr`` / ``pts_std`` — so the lake stays
 scoring-agnostic and the assembler (ticket 7) can re-score any snapshot in whatever
-``scoring_settings`` the league has at the time. Nothing is filtered either: rows with no game and
-an ADP-only stat line are stored as the feed returned them, because "who wasn't projected this week"
-is itself data.
+``scoring_settings`` the league has at the time. Nothing is filtered on *content*: rows with no game
+and an ADP-only stat line are stored as the feed returned them, because "who wasn't projected this
+week" is itself data. The one exception is rows without a usable key — they cannot be identified or
+deduplicated, so :func:`collect.base.dedupe_rows` drops them and logs it.
 
 Row shape is **flat** — a handful of identity/meta columns, then the raw ``stats`` dict merged in
 one key per column. Parquet is columnar and the store's readers project columns
@@ -25,12 +26,40 @@ players have since changed team), and copying it in would inject tomorrow's trut
 whose entire value is that it only knows today's. ``position``/``fantasy_positions`` exist nowhere
 else in the payload, so they are taken from ``player`` and are as-of capture time — correct for the
 live weekly captures these sources are built for.
+
+.. warning::
+
+   **``position`` is a static label, and on a backfill it is anachronistic.** It comes from the same
+   mutable ``player`` master that ``team`` is refused from; the difference is only that no
+   point-in-time alternative exists in the payload (the row-level ``team`` is non-null on all 758
+   stats rows checked, so refusing the master cost nothing there). ``sleeper_proj_*`` are
+   forward-only and captured live, so their ``position`` is genuinely as-of capture. Only a
+   **backfilled ``sleeper_stats_week``** is exposed: a 2018 row gets the player's *today* position.
+
+   Measured on 2018 (W1/W8/W15, 689 players): 617 join to nflverse via the gsis crosswalk and 15
+   disagree (2.4%), mostly FB/RB taxonomy noise between providers. Note that **nflverse is not the
+   fix** — its weekly ``position`` is a static per-player attribute too (of 563 players appearing in
+   2018, 2019, 2021 and 2023, *zero* have a position that varies by season), so sourcing it there
+   just relabels the same contamination. Real conversions are invisible in both: Taysom Hill (QB in
+   2018) and Cordarrelle Patterson (WR in 2018) read back as TE and RB respectively.
+
+   Impact by consumer: the label ``y_custom_points`` is **unaffected** (the scoring engine sums
+   stat × weight and never reads position); positional replacement level and the sims' per-position
+   CVs take a small mislabel rate; DST/K are immune (DEF rows key on the team abbreviation). It bites
+   the **breakout classifier**, where a WR→RB conversion *is* the role step-up being predicted — a
+   current position leaks the label rather than blurring a feature.
+
+   The fix belongs downstream, not here: ticket 5's ``_backfill=True`` marker makes these rows
+   identifiable (necessary, not sufficient), and ticket 7 should resolve position from
+   ``nflverse_depth`` — the one registered source that is genuinely as-of a date (``dt`` is in its
+   key, ``pos_abb`` is the value) — falling back to this static label under an explicit
+   ``position_is_static`` flag.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from sleeper import client
@@ -78,20 +107,39 @@ def _fantasy_positions(player: Mapping[str, Any]) -> str | None:
     return ",".join(str(v) for v in values)
 
 
-def _flatten(raw: Mapping[str, Any], *, source: str) -> dict[str, Any]:
-    """One raw Sleeper row -> one flat lake row (meta + verbatim stats)."""
+def _flatten(raw: Mapping[str, Any], *, source: str, key_cols: Sequence[str]) -> dict[str, Any]:
+    """One raw Sleeper row -> one flat lake row (meta + verbatim stats).
+
+    Merging stats over meta means a stat named like a meta column wins — the promise is that stats
+    pass through unchanged. The **key** is the one exception: identity is inviolable.
+    """
     player = raw.get("player") or {}
-    stats = raw.get("stats") or {}
+    stats = dict(raw.get("stats") or {})
     row: dict[str, Any] = {
         "player_id": _player_id(raw),
         "position": player.get("position"),
         "fantasy_positions": _fantasy_positions(player),
     }
     row.update({name: raw.get(name) for name in _META})
+
+    # A stat shadowing a KEY column would replace the row's identity (and undo _player_id's str
+    # coercion), after which the store dedups on a garbage key and files the row as someone else --
+    # the silent-corruption family this phase exists to avoid. So the key wins and the stat is
+    # dropped, loudly. Deliberately not an exception: raising would abandon the whole capture, and
+    # for the forward-only sources that loss is permanent, which is strictly worse than one lost
+    # column. Never observed; Sleeper's stat keys are stat-shaped.
+    stolen = sorted(set(key_cols) & set(stats))
+    if stolen:
+        for name in stolen:
+            stats.pop(name)
+        _LOG.error(
+            "%s: stat key(s) %s collide with the row key %s - dropped the stat, kept the key. "
+            "The provider's schema has changed; this needs a look.",
+            source, stolen, list(key_cols),
+        )
+
     clashing = sorted(set(row) & set(stats))
     if clashing:
-        # Never observed (Sleeper's stat keys are stat-shaped), but if the feed ever grows a stat
-        # named like our meta, the raw stat wins — the promise is that stats pass through unchanged.
         _LOG.warning(
             "%s: stat key(s) %s shadow meta columns; keeping the raw stat", source, clashing
         )
@@ -112,9 +160,10 @@ def _collect(
     *,
     week: int | None = None,
 ) -> Collected:
+    key_cols = SOURCES[source].key_cols
     rows = dedupe_rows(
-        (_flatten(r, source=source) for r in raw_rows),
-        SOURCES[source].key_cols,
+        (_flatten(r, source=source, key_cols=key_cols) for r in raw_rows),
+        key_cols,
         source=source,
         freshness=_freshness,
     )

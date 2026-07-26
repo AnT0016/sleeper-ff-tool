@@ -104,6 +104,10 @@ def test_collector_forwards_season_week_and_positions(raw):
     collect_proj_season(2026, positions=("QB",), fetch=season_fetch)
     assert season_fetch.calls == [((2026,), {"positions": ("QB",)})]
 
+    stats_fetch = _fetch(raw["stats_week"]["rows"])
+    collect_stats_week(2026, 5, positions=("DEF",), fetch=stats_fetch)
+    assert stats_fetch.calls == [((2026, 5), {"positions": ("DEF",)})]
+
 
 def test_collected_rejects_an_unregistered_source_or_foreign_key():
     with pytest.raises(ValueError, match="unknown source"):
@@ -154,6 +158,37 @@ def test_rows_without_a_usable_player_id_are_dropped(caplog):
 
     assert [r["player_id"] for r in capture.rows] == ["7"]
     assert "null/blank" in caplog.text
+
+
+def test_a_stat_shadowing_the_key_never_replaces_the_key(caplog):
+    """Identity is inviolable: a stat named ``player_id`` would file the row as someone else.
+
+    The store dedups on whatever key it is handed, so letting the stat win here corrupts the lake
+    silently -- and it would also undo ``_player_id``'s str coercion (the key would become a float).
+    """
+    rows = [
+        {"player_id": "4881", "team": "BAL", "stats": {"player_id": 999.0, "pass_yd": 300.0}},
+        {"player_id": "4882", "team": "BUF", "stats": {"pass_yd": 250.0}},
+    ]
+    with caplog.at_level(logging.WARNING):
+        capture = collect_proj_week(SEASON, WEEK, fetch=_fetch(rows))
+
+    stored = _by_id(capture)
+    assert sorted(stored) == ["4881", "4882"]
+    assert stored["4881"]["player_id"] == "4881"      # the key, not 999.0
+    assert stored["4881"]["pass_yd"] == 300.0         # the rest of the stat line is untouched
+    assert "collide with the row key" in caplog.text
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)  # loud: a schema change
+
+
+def test_a_stat_shadowing_non_key_meta_still_wins(caplog):
+    """The documented trade-off, pinned: for *meta* the raw stat wins (stats pass through)."""
+    rows = [{"player_id": "1", "team": "BAL", "stats": {"team": 42.0}}]
+    with caplog.at_level(logging.WARNING):
+        capture = collect_proj_week(SEASON, WEEK, fetch=_fetch(rows))
+
+    assert capture.rows[0]["team"] == 42.0
+    assert "shadow meta columns" in caplog.text
 
 
 def test_collectors_never_emit_reserved_columns(captures):

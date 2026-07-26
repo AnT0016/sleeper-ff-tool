@@ -33,6 +33,7 @@ def _points(row: Mapping[str, Any]) -> float:
 
 def _sample(rows: Iterable[Mapping[str, Any]], *, with_teamless: bool) -> list[dict]:
     """The top row per position (ties broken by player_id), plus one teamless row if asked."""
+    rows = list(rows)  # walked twice below, so a one-shot iterator would silently lose the 2nd pass
     best: dict[str, dict] = {}
     for row in rows:
         pos = (row.get("player") or {}).get("position")
@@ -45,11 +46,15 @@ def _sample(rows: Iterable[Mapping[str, Any]], *, with_teamless: bool) -> list[d
 
     picked = [best[p] for p in POSITIONS if p in best]
     if with_teamless:
+        # Skip any teamless row already picked as its position's best, or the fixture would carry a
+        # duplicate player_id -- which the collector tests (rightly) assert against.
+        chosen = {str(r.get("player_id")) for r in picked}
         teamless = sorted(
             (r for r in rows if not r.get("team")), key=lambda r: str(r.get("player_id"))
         )
-        if teamless:
-            picked.append(dict(teamless[0]))
+        extra = next((r for r in teamless if str(r.get("player_id")) not in chosen), None)
+        if extra is not None:
+            picked.append(dict(extra))
     return picked
 
 
