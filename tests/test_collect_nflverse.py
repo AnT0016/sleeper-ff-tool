@@ -272,7 +272,51 @@ def test_rows_the_key_cannot_address_are_filtered_to_the_grain(
 
     assert len(capture.rows) == raw.height - dropped
     assert "filtered" in caplog.text and key_col in caplog.text
+    # Quiet, because each of these is at or under its source's calibrated residual rate. The
+    # companion test below pins the other end -- above the ceiling it must not stay quiet.
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_a_filter_rate_above_the_source_ceiling_escalates_to_a_warning(caplog):
+    """The trade in ``_identified`` is only sound while the drop rate stays known.
+
+    Demoting a routine 202-row residual to INFO is right; letting "the gsis column broke in this
+    release" produce the same quiet line is not. Half the injury report going unidentifiable must
+    report itself at collect time, not seasons later as a join failure in the assembler.
+    """
+    raw = frame("injuries_2024")
+    half = raw.height // 2
+    broken = raw.with_columns(
+        pl.when(pl.int_range(pl.len()) < half)
+        .then(None)
+        .otherwise(pl.col("gsis_id"))
+        .alias("gsis_id")
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="collect.nflverse"):
+        capture = collect_injuries(SEASON, load=lambda _s: broken)
+
+    assert len(capture.rows) == raw.height - half
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "provider change" in warnings[0].getMessage()
+    assert "50.0%" in warnings[0].getMessage()  # names the rate, not just the count
+
+
+def test_a_source_with_no_known_residual_warns_on_the_very_first_dropped_row(caplog):
+    """snaps/injuries/schedules/crosswalk measure exactly 0% — so one bad row is already an anomaly."""
+    raw = frame("snaps_2024")
+    broken = raw.with_columns(
+        pl.when(pl.int_range(pl.len()) == 0)
+        .then(None)
+        .otherwise(pl.col("pfr_player_id"))
+        .alias("pfr_player_id")
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="collect.nflverse"):
+        collect_snaps(SEASON, load=lambda _s: broken)
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_injury_revisions_are_kept_because_date_modified_is_in_the_key(captures):

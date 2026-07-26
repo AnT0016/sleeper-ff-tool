@@ -124,8 +124,14 @@ _REGISTRY: tuple[Source, ...] = (
         ("postgame", "backfill"),
         backfillable=True,
     ),
-    # load_ff_opportunity: expected points + volume shares. posteam is in the key so a team-level
-    # row (null player_id) can't collide with another.
+    # load_ff_opportunity: expected points + volume shares.
+    # This key is exact but wider than it needs to be, and the original reason for that was wrong.
+    # It said posteam was here so a team-level row (null player_id) could not collide with another;
+    # that guarantee is unreachable, because a null key value is filtered before the store ever sees
+    # it (collect.nflverse._identified). posteam is in fact redundant: (game_id, player_id) is
+    # already unique across the player rows -- verified 5441/5441 in 2020 and 5586/5586 in 2024.
+    # Kept anyway (harmless, and narrowing a shipped key would rewrite partitions), but do not
+    # mistake it for load-bearing.
     _source(
         "nflverse_ff_opp",
         "week",

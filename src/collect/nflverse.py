@@ -26,7 +26,9 @@ the download cache) plus three pieces of hygiene, and nothing else:
   Verified lossless on 2024: no ``date_modified`` carries a sub-second component.
 * **Rows the registry key cannot identify are filtered to the source's grain**, before
   :func:`collect.base.dedupe_rows` ever sees them (see :func:`_identified` for why that is a grain
-  filter and not a swept-under defect).
+  filter and not a swept-under defect) — quietly up to a per-source rate calibrated on real
+  releases, and as a **WARNING** above it, so a provider change cannot hide behind the routine
+  residual.
 
 **Keys come from** :data:`collect.registry.SOURCES` **and are never written here** — the store dedups
 on whatever key it is handed, so a collector inventing its own would delete real rows on merge.
@@ -72,6 +74,29 @@ _LOG = logging.getLogger(__name__)
 
 #: How many offending keys a filter log names before truncating (mirrors ``collect.base``).
 _SAMPLE_KEYS = 3
+
+#: Per-source ceiling on the share of rows the registry key cannot address. At or below it the
+#: filter is routine provider grain (INFO); above it something has changed and it escalates to
+#: WARNING. Calibrated on 2016-2025 releases with headroom for normal variation:
+#:
+#: ===========================  ========  =======
+#: source                       measured  ceiling
+#: ===========================  ========  =======
+#: ``nflverse_player_week``     0.12%     1%
+#: ``nflverse_ff_opp``          3.7-7.0%  12%
+#: ``nflverse_depth``           1.0%      3%
+#: everything else              0%        0%
+#: ===========================  ========  =======
+#:
+#: A source with no known residual gets no allowance on purpose: the first unidentifiable row it
+#: ever produces is already an anomaly worth a warning (this is what would catch, say, a release
+#: that broke ``gsis_id`` on the injury report).
+_GRAIN_FILTER_CEILING: dict[str, float] = {
+    "nflverse_player_week": 0.01,
+    "nflverse_ff_opp": 0.12,
+    "nflverse_depth": 0.03,
+}
+_DEFAULT_CEILING = 0.0
 
 #: ISO-8601 UTC, seconds precision — the spelling the modern depth feed already uses for ``dt``.
 _ISO_UTC = "%Y-%m-%dT%H:%M:%SZ"
@@ -130,6 +155,21 @@ def _usable_key(frame: pl.DataFrame, key_cols: Sequence[str]) -> pl.Series:
     return frame.select(pl.all_horizontal(checks).alias("ok"))["ok"].fill_null(False)
 
 
+def _rate_is_judgeable(height: int, ceiling: float) -> bool:
+    """Whether a drop *rate* means anything on a frame this size.
+
+    A ceiling only says something once the frame is large enough for it to permit at least one row.
+    On a 23-row test sample a 1% ceiling is 0.23 rows, so a single unattributable line reads as 8.7%
+    and the comparison is noise rather than signal — which is exactly what the enriched fixtures are
+    (they over-represent the awkward shapes on purpose). Real captures are nowhere near this bound:
+    the smallest non-zero-ceiling source is ``ff_opp`` at ~5.6k rows a season.
+
+    Zero-ceiling sources never take this path: with no residual expected they are judged on count,
+    so one bad row warns however small the frame.
+    """
+    return height * ceiling >= 1
+
+
 def _identified(frame: pl.DataFrame, key_cols: Sequence[str], source: str) -> pl.DataFrame:
     """``frame`` minus the rows its registry key cannot address, logged with a count.
 
@@ -149,21 +189,40 @@ def _identified(frame: pl.DataFrame, key_cols: Sequence[str], source: str) -> pl
     Nothing recoverable is lost for ``ff_opportunity``: the team aggregate lives on every player row
     of that team-game in the ``*_team`` columns, so the unattributed residual is
     ``total_fantasy_points_exp_team`` minus the sum over the player rows.
+
+    **Quiet only up to a known rate.** Demoting this to INFO is the right trade for a residual whose
+    size is known, but "202 rows nflverse could not attribute" and "the ``gsis_id`` column broke in
+    this release" would otherwise produce the same-shaped, equally quiet line — and at 50% that trade
+    is plainly wrong. Above :data:`_GRAIN_FILTER_CEILING` for the source it escalates to WARNING and
+    names the rate, so a provider change reports itself instead of surfacing seasons later as a join
+    failure in the assembler.
     """
     keys = list(key_cols)
     usable = _usable_key(frame, keys)
     n_dropped = int((~usable).sum())
     if not n_dropped:
         return frame
-    _LOG.info(
-        "%s: filtered %d/%d provider row(s) with no usable value in key column(s) %s — they are "
-        "not rows at this source's grain and cannot be identified. Sample: %s",
-        source,
-        n_dropped,
-        frame.height,
-        keys,
-        frame.filter(~usable).select(keys).head(_SAMPLE_KEYS).rows(),
-    )
+
+    share = n_dropped / frame.height
+    ceiling = _GRAIN_FILTER_CEILING.get(source, _DEFAULT_CEILING)
+    sample = frame.filter(~usable).select(keys).head(_SAMPLE_KEYS).rows()
+    if ceiling <= 0:
+        over = True  # no residual expected here, and n_dropped > 0 by the guard above
+    else:
+        over = share > ceiling and _rate_is_judgeable(frame.height, ceiling)
+    if over:
+        _LOG.warning(
+            "%s: filtered %d/%d row(s) (%.1f%%) with no usable value in key column(s) %s - above "
+            "this source's expected residual of %.1f%%, so this is a provider change rather than "
+            "routine unattributed production. Sample: %s",
+            source, n_dropped, frame.height, share * 100, keys, ceiling * 100, sample,
+        )
+    else:
+        _LOG.info(
+            "%s: filtered %d/%d row(s) (%.2f%%) with no usable value in key column(s) %s - they "
+            "are not rows at this source's grain and cannot be identified. Sample: %s",
+            source, n_dropped, frame.height, share * 100, keys, sample,
+        )
     return frame.filter(usable)
 
 
@@ -257,7 +316,7 @@ def collect_depth_charts(season: int, *, load: Loader | None = None) -> Collecte
         _LOG.warning(
             "nflverse_depth season=%s: the provider returned the pre-2025 depth-chart schema "
             "(saw %s), which carries none of the registry key %s and has no clean key of its own. "
-            "Captured nothing — depth/role features start at 2025.",
+            "Captured nothing - depth/role features start at 2025.",
             season, legacy, list(SOURCES["nflverse_depth"].key_cols),
         )
         return Collected.for_source("nflverse_depth", season, [], week=None)
