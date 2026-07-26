@@ -54,7 +54,7 @@ LAKE_ROOT: Path = _REPO_ROOT / "data_cache" / "lake"
 #: Provenance columns the store attaches to every row. Collectors must not emit these.
 RESERVED: tuple[str, ...] = ("_source", "_season", "_week", "_captured_at")
 
-#: Backend selected by env (``local`` | ``r2``). Default keeps every run working with no credentials.
+#: Backend selected by env (``local`` | ``s3``). Default keeps every run working with no credentials.
 LAKE_BACKEND: str = (os.environ.get("LAKE_BACKEND") or "local").strip().lower() or "local"
 
 #: Suffix of in-flight writes. Deliberately not ``.parquet`` so listers skip it.
@@ -142,7 +142,7 @@ _ACTIVE: StorageBackend | None = None
 
 
 def register_backend(name: str, factory: Callable[[], StorageBackend]) -> None:
-    """Register a backend factory under ``name`` (how ``store.r2`` will plug itself in)."""
+    """Register a backend factory under ``name`` (how ``store.s3`` will plug itself in)."""
     _BACKENDS[name.strip().lower()] = factory
 
 
@@ -155,7 +155,7 @@ def get_backend(name: str | None = None) -> StorageBackend:
         return _ACTIVE
     key = name.strip().lower()
     if key not in _BACKENDS:
-        # Backends live in sibling modules that self-register on import (store.r2 -> "r2"), so a
+        # Backends live in sibling modules that self-register on import (store.s3 -> "s3"), so a
         # name we haven't seen gets one import attempt before it's called unknown.
         try:
             importlib.import_module(f"{__package__}.{key}")
@@ -164,7 +164,7 @@ def get_backend(name: str | None = None) -> StorageBackend:
     if key not in _BACKENDS:
         raise ValueError(
             f"unknown LAKE_BACKEND {name!r}; available: {sorted(_BACKENDS)}. "
-            "Set LAKE_BACKEND=local to use the committed-parquet dev backend."
+            "Set LAKE_BACKEND=local to use the local-parquet dev backend."
         )
     return _BACKENDS[key]()
 
