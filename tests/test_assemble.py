@@ -498,6 +498,59 @@ def test_position_resolves_as_of_the_depth_chart_before_lock(backend):
     assert row["depth_pos_rank"] == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    ("starter", "backup"),
+    [(("FB", 1), ("TE", 4)), (("TE", 2), ("QB", 3)), (("QB", 1), ("TE", 3))],
+)
+def test_a_player_listed_at_two_positions_resolves_to_the_one_he_starts_at(
+    backend, starter, backup
+):
+    """``pos_rank`` 1 is the starter and higher numbers are deeper, so the *smallest* rank wins.
+
+    Real shapes from the 2025 feed: 332 of 154,086 skill player-snapshots list a player twice, and
+    they are two people — Taysom Hill (QB/TE) and Connor Heyward (FB/TE). Picking the deeper listing
+    made Heyward's position oscillate TE(4) / FB(1) from week to week on a tie-break artifact rather
+    than on his role, which is a categorical feature that lies about a role change.
+    """
+    _base_lake(backend)
+    (start_pos, start_rank), (deep_pos, deep_rank) = starter, backup
+    _write(
+        backend, "nflverse_depth", SEASON,
+        [
+            # Same snapshot, same player, two listings — order reversed from rank on purpose, so a
+            # tie-break that quietly follows provider row order fails this too.
+            {"dt": "2026-09-15T07:00:00Z", "team": "KC", "gsis_id": GSIS, "pos_abb": deep_pos,
+             "pos_rank": deep_rank},
+            {"dt": "2026-09-15T07:00:00Z", "team": "KC", "gsis_id": GSIS, "pos_abb": start_pos,
+             "pos_rank": start_rank},
+        ],
+        captured_at=BACKFILL_RUN, key_cols=("dt", "team", "gsis_id", "pos_abb"),
+    )
+
+    row = _only(build_training_frame([SEASON], SCORING, backend=backend))
+
+    assert row["position"] == start_pos
+    assert row["depth_pos_rank"] == pytest.approx(float(start_rank))
+    assert not row["position_is_static"]
+
+
+def test_an_unranked_listing_loses_to_a_ranked_one(backend):
+    """A null ``pos_rank`` must not win by sorting after every real rank."""
+    _base_lake(backend)
+    _write(
+        backend, "nflverse_depth", SEASON,
+        [
+            {"dt": "2026-09-15T07:00:00Z", "team": "KC", "gsis_id": GSIS, "pos_abb": "TE",
+             "pos_rank": None},
+            {"dt": "2026-09-15T07:00:00Z", "team": "KC", "gsis_id": GSIS, "pos_abb": "RB",
+             "pos_rank": 2},
+        ],
+        captured_at=BACKFILL_RUN, key_cols=("dt", "team", "gsis_id", "pos_abb"),
+    )
+
+    assert _only(build_training_frame([SEASON], SCORING, backend=backend))["position"] == "RB"
+
+
 def test_position_falls_back_to_the_static_label_under_a_flag(backend):
     """Depth starts at 2025, and the static label is anachronistic — so it is flagged, not hidden."""
     _base_lake(backend)
@@ -571,6 +624,34 @@ def test_is_indoor_stays_three_state(backend):
 
 
 # --------------------------------------------------------------------------- arguments
+def test_a_usage_source_returning_duplicate_keys_aborts_rather_than_misaligning(
+    backend, monkeypatch
+):
+    """The lag is built positionally, so a fanned-out merge shifts *other players'* history in.
+
+    Both usage sources are deduped on the key, so this cannot happen today — which is exactly why
+    the guard is worth having: the failure it prevents is silent, produces a full-looking frame, and
+    would surface as a model that mysteriously underperforms.
+    """
+    _base_lake(backend)
+    from dataset import assemble
+
+    def duplicated(seasons, crosswalk, *, backend=None):
+        return pd.DataFrame(
+            {
+                "player_id": [SLEEPER, SLEEPER],
+                "season": [SEASON, SEASON],
+                "week": [WEEK, WEEK],
+                "exp_points": [1.0, 2.0],
+                "rush_share": [0.1, 0.2],
+            }
+        )
+
+    monkeypatch.setattr(assemble, "_opportunity", duplicated)
+    with pytest.raises(AssertionError, match="duplicate"):
+        build_training_frame([SEASON], SCORING, backend=backend)
+
+
 def test_an_unsupported_asof_is_refused(backend):
     _base_lake(backend)
     with pytest.raises(ValueError, match="asof"):

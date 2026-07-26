@@ -102,6 +102,22 @@ Two discontinuities are structural and are left visible rather than papered over
 The label is a union, because ``nflverse_player_week`` has **zero** DEF rows and DEF is a starting
 slot: skill players and kickers score from nflverse actuals through ``ids.nflverse_to_sleeper_stats``,
 team defences score from ``sleeper_stats_week``, which is already Sleeper-keyed.
+
+What the row universe is, and what that means downstream
+--------------------------------------------------------
+A row exists only where the player recorded a stat line that week, because that is what the label
+source contains. So this frame is a sample of **player-weeks in which the player played**, and a
+model fitted on it estimates points *conditional on appearing* — it never sees the outcome of a
+player who was inactive, benched, or a healthy scratch.
+
+That is not a leak (nothing here knows the target week), but it is a selection effect, and start/sit
+is exactly the decision where it bites: at inference the question is asked about players whose
+availability is uncertain, which is the population the training rows exclude. Consumers wanting an
+unconditional expectation need to model availability separately and compose the two — the injury
+columns and ``games_played_prior`` are here partly so that stays possible. Left as a documented
+property rather than papered over with zero-filled rows for absent players, because imputing a 0 for
+"did not play" and a real 0 for "played and did nothing" as the same value would be its own quiet
+corruption.
 """
 
 from __future__ import annotations
@@ -183,6 +199,11 @@ _TEAM_ALIASES: dict[str, str] = {
 #: (the feed spells kicker ``PK``).
 _DEPTH_POSITIONS: frozenset[str] = frozenset({"QB", "RB", "FB", "WR", "TE", "PK"})
 _DEPTH_POSITION_RENAME: dict[str, str] = {"PK": "K"}
+
+#: Stand-in ``pos_rank`` for a listing the feed left unranked, deeper than any real one (the 2025
+#: feed ranges 1-15). It exists so an unranked listing loses the starter tie-break rather than
+#: winning it by sorting after everything.
+_UNRANKED = 99.0
 
 #: Per-week quantities the lagged usage features are built from: ``column -> output prefix``.
 _USAGE_COLS: dict[str, str] = {
@@ -671,12 +692,21 @@ def _positions(
         depth["gsis_id"] = depth["gsis_id"].astype("string")
         depth["position"] = depth["pos_abb"].astype("string").replace(_DEPTH_POSITION_RENAME)
         depth["pos_rank"] = pd.to_numeric(depth["pos_rank"], errors="coerce")
-        # A player can hold more than one listed position in a single snapshot (156 of 150,569
-        # skill player-snapshots in 2025). Highest listing wins, then alphabetical, so it is stable.
+        # A player can hold more than one listed position in a single snapshot -- 332 of 154,086
+        # skill player-snapshots in 2025, which is two players: Taysom Hill (QB/TE) and Connor
+        # Heyward (FB/TE). The **starting** listing wins, and the direction is not cosmetic:
+        # pos_rank 1 is the starter and higher numbers are deeper, so sorting on pos_rank and
+        # keeping the last row picks the *deepest* listing. That resolved Heyward to TE(4) in some
+        # weeks and FB(1) in others -- a categorical feature oscillating on a tie-break artifact
+        # rather than on his role. Negating it makes the smallest rank sort last, which is the row
+        # _latest keeps. An unranked listing loses to any real one rather than winning by sorting
+        # after it (pos_rank is never null on the 2025 feed; this is for the release that changes
+        # that). Equal ranks fall to alphabetical order: arbitrary, but stable across runs.
+        depth["_starter_first"] = -depth["pos_rank"].fillna(_UNRANKED)
         depth = _latest(
             depth.dropna(subset=["known_at", "gsis_id"]),
             ["gsis_id", "known_at"],
-            ["pos_rank", "position"],
+            ["_starter_first", "position"],
         ).sort_values("known_at", kind="stable")
 
         left = pd.DataFrame(
@@ -1028,6 +1058,16 @@ def _lagged_usage(
         _opportunity(seasons, crosswalk, backend=backend),
     ):
         facts = facts.merge(extra, on=list(KEY_COLS), how="left") if not extra.empty else facts
+        # Both inputs are _latest-deduped on KEY_COLS, so a left merge cannot fan out -- but if one
+        # ever did, the positional reindex at the end of this function would hand every subsequent
+        # player the wrong history instead of failing. In a module whose failure mode is "plausible
+        # but wrong", that trade is not worth leaving to an invariant held somewhere else.
+        if len(facts) != len(targets):
+            raise AssertionError(
+                f"lagged usage: a feature merge changed the row count ({len(targets)} -> "
+                f"{len(facts)}), so a source returned duplicate {list(KEY_COLS)} keys. The lag "
+                "would be misaligned rather than merely wrong; refusing to build the frame."
+            )
     for column in _USAGE_COLS:
         facts[column] = (
             pd.to_numeric(facts[column], errors="coerce")
