@@ -6,7 +6,7 @@ the runners (``scripts/collect.py``, ``scripts/backfill_lake.py``) decide *what 
 ``cadence`` / ``backfillable``, and the assembler reads ``grain`` to know what a row means. Adding a
 source is a single entry here plus a collector — never a change to the storage layer.
 
-Two distinctions worth keeping straight:
+Three distinctions worth keeping straight:
 
 * ``grain`` is the grain of a **row** (``week`` = one player-week, ``season`` = one player-season,
   ``game`` = one game). It is *not* the partition layout: nflverse loaders return a whole season at
@@ -16,6 +16,11 @@ Two distinctions worth keeping straight:
 * ``cadence`` is *when a capture runs*: ``prelock`` (Thu/Sun, before kickoff — the point-in-time
   snapshots whose value is that they were taken before the outcome existed), ``postgame`` (Tue,
   finalized actuals/usage) and ``backfill`` (the one-time historical pull).
+* ``content_known`` is *when the row's week-N content came into existence*, which is a different
+  question and the one the assembler needs (see :class:`Source`). Do not read one off the other:
+  ``nflverse_schedules`` runs on the ``prelock`` cadence and carries ``result``/``home_score``/
+  ``away_score``/``total``, so "captured pre-lock" says nothing about whether the payload is
+  pre-kickoff.
 
 ``backfillable`` is the honest answer to "can we recover this for past seasons?". Sleeper's
 projection endpoints only ever serve the *latest* numbers, so ``sleeper_proj_*`` are **forward-only**
@@ -38,6 +43,10 @@ GRAINS: tuple[str, ...] = ("week", "season", "game")
 #: Capture cadences a source may participate in.
 CADENCES: tuple[str, ...] = ("prelock", "postgame", "backfill")
 
+#: When a row's content became knowable, independent of when it was captured (see
+#: :attr:`Source.content_known`).
+CONTENT_KNOWN: tuple[str, ...] = ("pre_kickoff", "post_game", "row_timestamp")
+
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -50,6 +59,25 @@ class Source:
     key_cols: tuple[str, ...]
     cadence: frozenset[str]
     backfillable: bool
+    #: When the content of a week-N row came into existence — **not** when it was captured. The
+    #: assembler needs this because a backfilled row's ``_captured_at`` is the backfill run, which
+    #: says nothing about knowability: every 2016-2025 row in the lake is stamped with one 2026
+    #: instant, so a literal "captured before week N's lock" rule admits *nothing* same-week and
+    #: leaves the training frame with no market, injury or role features at all.
+    #:
+    #: * ``pre_kickoff`` — week-N content exists before week N's first kickoff (a projection, a
+    #:   practice report, a betting line), so a backfilled row is legal as a week-N feature.
+    #: * ``post_game`` — week-N content exists only once week N has been played (actuals, usage,
+    #:   final scores), so it is legal only for weeks **after** N.
+    #: * ``row_timestamp`` — the row carries its own event stamp, and admissibility is resolved
+    #:   from that column rather than from the week (``nflverse_depth.dt``).
+    #:
+    #: A **mixed** source takes the label of its most dangerous content unless the safe family is
+    #: separately named *and* separately guarded. ``weather`` qualifies (``forecast_*`` vs.
+    #: ``observed_*``, the latter gated on ``_captured_at >= kickoff_utc``); ``nflverse_schedules``
+    #: does not — its post-game columns are the outcome itself, and ``vegas_odds`` already exposes
+    #: the sanctioned pre-game view of the same feed.
+    content_known: Literal["pre_kickoff", "post_game", "row_timestamp"]
     #: Earliest season the backfill can actually recover, when that is later than the lake's span.
     #: ``None`` means "as far back as anyone asks" — the normal case.
     backfillable_from: int | None = None
@@ -68,6 +96,10 @@ class Source:
             # Provenance is the store's, not the row's: a key on _captured_at would defeat the
             # whole point-in-time dedup (every capture would look like a brand-new row).
             raise ValueError(f"{self.name}: key_cols must exclude reserved columns {reserved}")
+        if self.content_known not in CONTENT_KNOWN:
+            raise ValueError(
+                f"{self.name}: content_known {self.content_known!r} not in {CONTENT_KNOWN}"
+            )
         if not self.cadence:
             raise ValueError(f"{self.name}: cadence must be non-empty")
         unknown = sorted(set(self.cadence) - set(CADENCES))
@@ -108,6 +140,7 @@ def _source(
     cadence: tuple[str, ...],
     *,
     backfillable: bool,
+    content_known: str,
     backfillable_from: int | None = None,
 ) -> Source:
     return Source(
@@ -116,6 +149,7 @@ def _source(
         key_cols=key_cols,
         cadence=frozenset(cadence),
         backfillable=backfillable,
+        content_known=content_known,  # type: ignore[arg-type]
         backfillable_from=backfillable_from,
     )
 
@@ -124,13 +158,32 @@ _REGISTRY: tuple[Source, ...] = (
     # --- Sleeper (forward-only: the endpoints serve only the latest values) --------------------
     # Raw per-stat projection rows, captured before lock. Week-partitioned, so player_id alone is
     # the key. THE reason this phase exists — unrecoverable once the week is played.
-    _source("sleeper_proj_week", "week", ("player_id",), ("prelock",), backfillable=False),
+    _source(
+        "sleeper_proj_week",
+        "week",
+        ("player_id",),
+        ("prelock",),
+        backfillable=False,
+        content_known="pre_kickoff",
+    ),
     # Season-long projections; drift over the season is itself a signal (role changes, injuries).
-    _source("sleeper_proj_season", "season", ("player_id",), ("prelock",), backfillable=False),
+    _source(
+        "sleeper_proj_season",
+        "season",
+        ("player_id",),
+        ("prelock",),
+        backfillable=False,
+        content_known="pre_kickoff",
+    ),
     # Sleeper's own weekly actuals — the cross-check against nflverse for DST/K, where nflverse's
     # player-level feed has no team-defense aggregate.
     _source(
-        "sleeper_stats_week", "week", ("player_id",), ("postgame", "backfill"), backfillable=True
+        "sleeper_stats_week",
+        "week",
+        ("player_id",),
+        ("postgame", "backfill"),
+        backfillable=True,
+        content_known="post_game",
     ),
     # --- nflverse (backfillable from public releases) ------------------------------------------
     # load_player_stats(summary_level="week"). season_type is in the key because postseason weeks
@@ -141,6 +194,7 @@ _REGISTRY: tuple[Source, ...] = (
         ("player_id", "season_type", "week"),
         ("postgame", "backfill"),
         backfillable=True,
+        content_known="post_game",
     ),
     # load_snap_counts: PFR-keyed (no gsis_id). game_id pins the week *and* the opponent.
     _source(
@@ -149,6 +203,7 @@ _REGISTRY: tuple[Source, ...] = (
         ("pfr_player_id", "game_id"),
         ("postgame", "backfill"),
         backfillable=True,
+        content_known="post_game",
     ),
     # load_ff_opportunity: expected points + volume shares.
     # This key is exact but wider than it needs to be, and the original reason for that was wrong.
@@ -164,6 +219,7 @@ _REGISTRY: tuple[Source, ...] = (
         ("game_id", "posteam", "player_id"),
         ("postgame", "backfill"),
         backfillable=True,
+        content_known="post_game",
     ),
     # Weekly injury report. Point-in-time: the same player-week is re-captured as the report firms
     # up through the week, and each day's capture is kept -- Thursday's Questionable and Sunday's Out
@@ -182,6 +238,7 @@ _REGISTRY: tuple[Source, ...] = (
         ("gsis_id", "game_type", "week"),
         ("prelock", "backfill"),
         backfillable=True,
+        content_known="pre_kickoff",
     ),
     # Schedules carry the closing Vegas lines and the observed temp/wind, so they're captured on
     # both cadences: pre-lock for the lines, post-game for the final result.
@@ -191,6 +248,7 @@ _REGISTRY: tuple[Source, ...] = (
         ("game_id",),
         ("prelock", "postgame", "backfill"),
         backfillable=True,
+        content_known="post_game",
     ),
     # Depth charts are time-stamped snapshots; dt is part of the key because several snapshots can
     # land in one week and a player can appear at more than one position.
@@ -204,17 +262,39 @@ _REGISTRY: tuple[Source, ...] = (
         ("dt", "team", "gsis_id", "pos_abb"),
         ("prelock", "backfill"),
         backfillable=True,
+        content_known="row_timestamp",
         backfillable_from=2025,
     ),
     # load_ff_playerids. mfl_id is ffverse's primary key (sleeper_id/gsis_id are nullable).
-    _source("id_crosswalk", "season", ("mfl_id",), ("postgame", "backfill"), backfillable=True),
+    _source(
+        "id_crosswalk",
+        "season",
+        ("mfl_id",),
+        ("postgame", "backfill"),
+        backfillable=True,
+        content_known="post_game",
+    ),
     # --- derived (market + weather) ------------------------------------------------------------
     # Implied team totals derived from schedules' total_line/spread_line. Kept as its own source so
     # the derivation is inspectable rather than buried in the assembler.
-    _source("vegas_odds", "game", ("game_id",), ("prelock", "backfill"), backfillable=True),
+    _source(
+        "vegas_odds",
+        "game",
+        ("game_id",),
+        ("prelock", "backfill"),
+        backfillable=True,
+        content_known="pre_kickoff",
+    ),
     # open-meteo forecast pre-lock; historical temp/wind from schedules on backfill. Domes are
     # flagged rather than given fabricated numbers.
-    _source("weather", "game", ("game_id",), ("prelock", "backfill"), backfillable=True),
+    _source(
+        "weather",
+        "game",
+        ("game_id",),
+        ("prelock", "backfill"),
+        backfillable=True,
+        content_known="pre_kickoff",
+    ),
 )
 
 #: The registry, keyed by source name.

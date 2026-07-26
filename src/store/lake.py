@@ -401,24 +401,68 @@ def write_snapshot(
     return written
 
 
+def _read_projected(
+    store: StorageBackend, key: str, columns: Sequence[str] | None
+) -> pd.DataFrame:
+    """``key`` projected to ``columns``, tolerating a partition that lacks some of them.
+
+    The projection is the point of having ``columns=`` on the protocol at all: the assembler wants
+    a dozen columns out of ``nflverse_player_week``'s 150, and materializing the rest is wasted
+    memory locally and wasted transfer on a cloud backend.
+
+    Tolerating a miss is not laziness — a raw layer's schema legitimately drifts across seasons
+    (nflverse dropped ``injuries.date_modified`` in 2025, and rewrote the depth feed entirely), so a
+    hard failure would make a ten-season read impossible for any column that has not always
+    existed. A missing column comes back as all-NA, which is what a reader would have had to
+    reindex to anyway. The retry costs a full read, so it only fires on the partitions that drifted.
+    """
+    if columns is None:
+        return store.read_parquet(key)
+    wanted = list(dict.fromkeys(columns))
+    try:
+        return store.read_parquet(key, columns=wanted)
+    except Exception:  # noqa: BLE001 - every engine spells "no such column" differently
+        part = store.read_parquet(key)
+        missing = [c for c in wanted if c not in part.columns]
+        # DEBUG, not INFO: for a sparse stat feed this is routine rather than notable.
+        # ``sleeper_stats_week`` writes only the keys a week actually produced, so a week in which
+        # no defence pitched a shutout has no ``pts_allow_0`` column at all — logging that per
+        # partition would be 180 lines on a ten-season read and would teach the reader to skim.
+        _LOG.debug(
+            "%s: column(s) %s absent from this partition — returning them as NA (a raw layer's "
+            "schema drifts across seasons)", key, missing,
+        )
+        return part.reindex(columns=wanted)
+
+
 def read_snapshot(
-    source: str, season: int, week: int | None = None, *, backend: StorageBackend | None = None
+    source: str,
+    season: int,
+    week: int | None = None,
+    *,
+    columns: Sequence[str] | None = None,
+    backend: StorageBackend | None = None,
 ) -> pd.DataFrame:
     """One partition, or an empty (reserved-column-only) frame when it was never captured."""
     store = _resolve(backend)
     key = partition_key(source, season, week)
     if not store.exists(key):
         return _empty_frame()
-    return store.read_parquet(key)
+    return _read_projected(store, key, columns)
 
 
 def read_source(
     source: str,
     seasons: Iterable[int] | None = None,
     *,
+    columns: Sequence[str] | None = None,
     backend: StorageBackend | None = None,
 ) -> pd.DataFrame:
-    """Every captured partition of ``source`` (optionally limited to ``seasons``), concatenated."""
+    """Every captured partition of ``source`` (optionally limited to ``seasons``), concatenated.
+
+    ``columns`` projects each partition (see :func:`_read_projected`); a column absent from a given
+    partition reads back as NA rather than raising.
+    """
     store = _resolve(backend)
     wanted = None if seasons is None else {int(s) for s in seasons}
     frames: list[pd.DataFrame] = []
@@ -426,7 +470,7 @@ def read_source(
         _, key_season, _ = _parse_key(key)
         if wanted is not None and key_season not in wanted:
             continue
-        part = store.read_parquet(key)
+        part = _read_projected(store, key, columns)
         if not part.empty:
             frames.append(part)
     if not frames:

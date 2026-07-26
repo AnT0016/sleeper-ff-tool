@@ -50,6 +50,18 @@ _FGMISS_COLS = ("fg_missed", "fg_blocked")
 _XPMISS_COLS = ("pat_missed", "pat_blocked")
 
 
+# Every nflverse weekly column ``nflverse_to_sleeper_stats`` reads. Public so a caller can project
+# a lake partition down to exactly what re-scoring needs (``nflverse_player_week`` carries 150
+# columns and the label needs 22 of them) without duplicating -- and drifting from -- the lists above.
+NFLVERSE_STAT_COLS: tuple[str, ...] = (
+    *STAT_MAP,
+    *_FUMBLE_LOST_COLS,
+    *_FG_50P_COLS,
+    *_FGMISS_COLS,
+    *_XPMISS_COLS,
+)
+
+
 def _num(row: Mapping[str, Any], col: str) -> float:
     val = row.get(col)
     return float(val) if val is not None else 0.0
