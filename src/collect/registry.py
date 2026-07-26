@@ -20,7 +20,8 @@ Two distinctions worth keeping straight:
 ``backfillable`` is the honest answer to "can we recover this for past seasons?". Sleeper's
 projection endpoints only ever serve the *latest* numbers, so ``sleeper_proj_*`` are **forward-only**
 — they start accumulating at 2026 Week 1 and no amount of work recovers 2016-2025. Everything else
-is recoverable from nflverse releases today.
+is recoverable from nflverse releases today — some of it only back to a point, which is what
+``backfillable_from`` records (see :meth:`Source.backfills_season`).
 """
 
 from __future__ import annotations
@@ -49,6 +50,9 @@ class Source:
     key_cols: tuple[str, ...]
     cadence: frozenset[str]
     backfillable: bool
+    #: Earliest season the backfill can actually recover, when that is later than the lake's span.
+    #: ``None`` means "as far back as anyone asks" — the normal case.
+    backfillable_from: int | None = None
 
     def __post_init__(self) -> None:
         if not _NAME_RE.match(self.name or ""):
@@ -75,6 +79,26 @@ class Source:
                 f"{sorted(self.cadence)} — a backfillable source runs in the backfill, and a "
                 "forward-only one cannot"
             )
+        if self.backfillable_from is not None and not self.backfillable:
+            raise ValueError(
+                f"{self.name}: backfillable_from={self.backfillable_from} on a source that is not "
+                "backfillable at all — drop it rather than implying history starts somewhere"
+            )
+
+    def backfills_season(self, season: int) -> bool:
+        """Is ``season`` actually recoverable for this source?
+
+        The two questions ``backfillable`` alone cannot separate. ``nflverse_depth`` *is*
+        recoverable — nflverse publishes it, and the collector reads it fine — but only from 2025,
+        because the pre-2025 feed is a different shape with no clean key (see ``collect.nflverse``).
+        Expressing that by dropping ``"backfill"`` from its cadence is impossible: the invariant
+        above ties cadence to ``backfillable``, so it would have to claim the feed is unrecoverable,
+        which is false for 2025+. A start year states it exactly, and keeps the backfill from walking
+        2016-2024 to write nine empty partitions.
+        """
+        if not self.backfillable:
+            return False
+        return self.backfillable_from is None or int(season) >= int(self.backfillable_from)
 
 
 def _source(
@@ -84,6 +108,7 @@ def _source(
     cadence: tuple[str, ...],
     *,
     backfillable: bool,
+    backfillable_from: int | None = None,
 ) -> Source:
     return Source(
         name=name,
@@ -91,6 +116,7 @@ def _source(
         key_cols=key_cols,
         cadence=frozenset(cadence),
         backfillable=backfillable,
+        backfillable_from=backfillable_from,
     )
 
 
@@ -163,12 +189,17 @@ _REGISTRY: tuple[Source, ...] = (
     ),
     # Depth charts are time-stamped snapshots; dt is part of the key because several snapshots can
     # land in one week and a player can appear at more than one position.
+    # 2025-forward: nflverse rewrote the feed that season and the key above is the modern one. The
+    # legacy shape carries none of it and has no clean key of its own, so collect_depth_charts
+    # returns an empty capture for an older season -- backfillable_from keeps the backfill from
+    # walking 2016-2024 to produce nine of those.
     _source(
         "nflverse_depth",
         "week",
         ("dt", "team", "gsis_id", "pos_abb"),
         ("prelock", "backfill"),
         backfillable=True,
+        backfillable_from=2025,
     ),
     # load_ff_playerids. mfl_id is ffverse's primary key (sleeper_id/gsis_id are nullable).
     _source("id_crosswalk", "season", ("mfl_id",), ("postgame", "backfill"), backfillable=True),
@@ -195,6 +226,12 @@ def sources_for_cadence(cadence: str) -> tuple[Source, ...]:
     return tuple(s for s in _REGISTRY if cadence in s.cadence)
 
 
-def backfillable_sources() -> tuple[Source, ...]:
-    """Every source recoverable for past seasons (what ``scripts/backfill_lake.py`` pulls)."""
-    return tuple(s for s in _REGISTRY if s.backfillable)
+def backfillable_sources(season: int | None = None) -> tuple[Source, ...]:
+    """Every source recoverable for past seasons (what ``scripts/backfill_lake.py`` pulls).
+
+    With a ``season``, narrowed to the sources whose history actually reaches it — see
+    :meth:`Source.backfills_season`.
+    """
+    if season is None:
+        return tuple(s for s in _REGISTRY if s.backfillable)
+    return tuple(s for s in _REGISTRY if s.backfills_season(season))

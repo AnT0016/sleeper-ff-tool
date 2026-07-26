@@ -111,6 +111,43 @@ def test_backfillable_sources_matches_the_flag():
     assert {s.name for s in sources_for_cadence("backfill")} == EXPECTED - FORWARD_ONLY
 
 
+# --------------------------------------------------------------------------- backfillable_from
+def test_depth_charts_are_backfillable_only_from_the_rewritten_feed():
+    """nflverse replaced the depth-chart feed in 2025; the legacy shape has no usable key.
+
+    Expressing that by dropping ``"backfill"`` from the cadence is impossible — the
+    cadence/backfillable invariant would force ``backfillable=False``, which claims the feed is
+    unrecoverable, and it isn't from 2025 on.
+    """
+    depth = SOURCES["nflverse_depth"]
+    assert depth.backfillable is True
+    assert depth.backfillable_from == 2025
+    assert not depth.backfills_season(2024)
+    assert depth.backfills_season(2025) and depth.backfills_season(2026)
+
+
+def test_every_other_source_backfills_as_far_back_as_asked():
+    for source in SOURCES.values():
+        if source.name == "nflverse_depth":
+            continue
+        assert source.backfillable_from is None
+        assert source.backfills_season(2016) == source.backfillable
+
+
+def test_backfillable_sources_narrows_to_what_a_season_can_actually_recover():
+    assert "nflverse_depth" not in {s.name for s in backfillable_sources(2024)}
+    assert "nflverse_depth" in {s.name for s in backfillable_sources(2025)}
+    # Everything else is unaffected by the season.
+    assert {s.name for s in backfillable_sources(2024)} | {"nflverse_depth"} == (
+        {s.name for s in backfillable_sources()}
+    )
+
+
+def test_a_start_year_on_a_forward_only_source_is_rejected():
+    with pytest.raises(ValueError, match="not backfillable"):
+        _make(backfillable_from=2020)
+
+
 def test_sources_for_cadence_rejects_an_unknown_cadence():
     with pytest.raises(ValueError, match="unknown cadence"):
         sources_for_cadence("midweek")
