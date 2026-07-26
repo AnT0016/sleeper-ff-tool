@@ -135,10 +135,14 @@ _REGISTRY: tuple[Source, ...] = (
     ),
     # Weekly injury report. Point-in-time: the same player-week is re-captured as the report firms
     # up through the week, and each day's capture is kept.
+    # date_modified is the report *revision* and belongs in the key: a player is commonly listed
+    # twice in one week (e.g. Questionable early, Out after the final practice), and without it the
+    # two revisions collapse into whichever the provider happened to list last — persisting a stale
+    # status. Verified against real 2024 data: 0 duplicates with it, silent row loss without it.
     _source(
         "nflverse_injuries",
         "week",
-        ("gsis_id", "game_type", "week"),
+        ("gsis_id", "game_type", "week", "date_modified"),
         ("prelock", "backfill"),
         backfillable=True,
     ),

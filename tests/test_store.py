@@ -8,9 +8,12 @@ tested from both directions.
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 import pytest
 
+from collect.registry import SOURCES
 from store.lake import (
     LAKE_ROOT,
     RESERVED,
@@ -258,6 +261,100 @@ def test_lake_inventory_of_an_empty_lake_has_the_right_columns(backend):
     assert inv.columns.tolist() == [
         "source", "season", "week", "n_rows", "path", "latest_captured_at",
     ]
+
+
+# --------------------------------------------------------------------------- capture integrity
+# _dedup collapses on key_cols + capture date, and pandas treats NaN == NaN, so a key that doesn't
+# actually identify a capture's rows destroys data silently. Superseding an *earlier capture* is the
+# intended rule; loss *within* one capture is a bug and must be audible.
+INJURY_REVISIONS = [
+    {"gsis_id": "00-0039359", "game_type": "REG", "week": 15,
+     "date_modified": "2024-12-15 03:34", "report_status": "Questionable"},
+    {"gsis_id": "00-0039359", "game_type": "REG", "week": 15,
+     "date_modified": "2024-12-15 14:17", "report_status": "Out"},
+]
+
+
+def test_injury_report_revisions_survive_the_registry_key(backend):
+    """Regression (real 2024 W15 shape): one player, two same-week revisions, Questionable -> Out.
+
+    Keyed without ``date_modified`` the store kept 1 of the 2 -- and because ``keep="last"`` follows
+    provider row order rather than the revision time, the survivor was the stale *Questionable*.
+    """
+    write_snapshot(
+        "nflverse_injuries", 2024, INJURY_REVISIONS, captured_at=MON,
+        key_cols=SOURCES["nflverse_injuries"].key_cols, backend=backend,
+    )
+    df = read_snapshot("nflverse_injuries", 2024, backend=backend)
+
+    assert len(df) == 2
+    assert set(df["report_status"]) == {"Questionable", "Out"}
+
+
+def test_the_superseded_injury_key_loses_a_revision_but_is_no_longer_silent(backend, caplog):
+    """Pins the *class* of bug: the old key still loses the row, but now says so."""
+    with caplog.at_level(logging.WARNING, logger="store.lake"):
+        write_snapshot(
+            "nflverse_injuries", 2024, INJURY_REVISIONS, captured_at=MON,
+            key_cols=("gsis_id", "game_type", "week"), backend=backend,
+        )
+
+    assert len(read_snapshot("nflverse_injuries", 2024, backend=backend)) == 1  # the loss
+    assert "do not identify rows within one capture" in caplog.text            # now audible
+    assert "00-0039359" in caplog.text                                         # names the offender
+
+
+def test_null_key_values_warn(backend, caplog):
+    with caplog.at_level(logging.WARNING, logger="store.lake"):
+        _write(backend, [{"player_id": None, "proj": 1.0}, {"player_id": None, "proj": 2.0}])
+    assert "null in key column" in caplog.text
+
+
+def test_intended_point_in_time_dedup_never_warns(backend, caplog):
+    """Guards against a false positive: cross-day supersede is the design, not a defect."""
+    _write(backend, _rows(("4046", 21.5)), captured_at=MON)
+    with caplog.at_level(logging.WARNING, logger="store.lake"):
+        _write(backend, _rows(("4046", 23.9)), captured_at=TUE)   # later day: both kept
+        _write(backend, _rows(("4046", 24.1)), captured_at=MON_LATER)  # same day: supersedes
+    assert caplog.text == ""
+
+
+# --------------------------------------------------------------------------- cheap inventory
+class _SpyBackend(LocalParquetBackend):
+    """Records every ``read_parquet`` so a test can prove payload columns were never fetched."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.reads: list[tuple[str, tuple[str, ...] | None]] = []
+
+    def read_parquet(self, key, columns=None):
+        self.reads.append((key, tuple(columns) if columns is not None else None))
+        return super().read_parquet(key, columns)
+
+
+def test_partition_summary_reports_rows_and_latest_stamp(backend):
+    _write(backend, _rows(("4046", 21.5)), captured_at=MON)
+    _write(backend, _rows(("6794", 14.0)), captured_at=TUE)
+    assert backend.partition_summary(partition_key(SOURCE, 2026, 1)) == (2, TUE)
+
+
+def test_read_parquet_projects_columns(backend):
+    _write(backend, _rows(("4046", 21.5)))
+    df = backend.read_parquet(partition_key(SOURCE, 2026, 1), columns=["player_id"])
+    assert df.columns.tolist() == ["player_id"]
+
+
+def test_lake_inventory_never_fetches_payload_columns(tmp_path):
+    """On a cloud backend, answering this by materializing partitions downloads the whole lake."""
+    spy = _SpyBackend(tmp_path)
+    _write(spy, _rows(("4046", 21.5), ("6794", 14.0)))
+    spy.reads.clear()
+
+    inv = lake_inventory(backend=spy)
+
+    assert inv.loc[0, "n_rows"] == 2
+    assert inv.loc[0, "latest_captured_at"] == MON
+    assert spy.reads == []  # footer metadata + one column chunk, never a materialized frame
 
 
 # --------------------------------------------------------------------------- backend selection

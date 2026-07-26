@@ -42,8 +42,12 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 _LOG = logging.getLogger(__name__)
+
+#: How many offending keys a capture-integrity warning names before truncating.
+_SAMPLE_KEYS = 3
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,14 +84,23 @@ class StorageBackend(Protocol):
     def exists(self, key: str) -> bool:
         ...
 
-    def read_parquet(self, key: str) -> pd.DataFrame:
-        ...
+    def read_parquet(self, key: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
+        """``key`` as a frame. ``columns`` projects — a backend must not fetch the rest."""
 
     def write_parquet(self, key: str, df: pd.DataFrame) -> Path:
         """Persist ``df`` at ``key`` atomically; returns the locator written."""
 
     def list_keys(self, prefix: str = "") -> list[str]:
         """Every partition key under ``prefix`` (a *directory* prefix, e.g. a source name)."""
+
+    def partition_summary(self, key: str) -> tuple[int, str]:
+        """``(n_rows, latest _captured_at)`` for ``key`` **without** reading payload columns.
+
+        This is on the protocol because only the backend knows the cheap way: locally it is the
+        parquet footer (row count is metadata) plus a single column chunk. A backend that answered
+        by materializing the object would silently turn :func:`lake_inventory` — a call whose name
+        promises it is cheap — into a download of the entire lake.
+        """
 
 
 class LocalParquetBackend:
@@ -109,8 +122,21 @@ class LocalParquetBackend:
     def exists(self, key: str) -> bool:
         return self.path_for(key).is_file()
 
-    def read_parquet(self, key: str) -> pd.DataFrame:
-        return pd.read_parquet(self.path_for(key))
+    def read_parquet(self, key: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
+        return pd.read_parquet(
+            self.path_for(key), columns=list(columns) if columns is not None else None
+        )
+
+    def partition_summary(self, key: str) -> tuple[int, str]:
+        handle = pq.ParquetFile(self.path_for(key))
+        n_rows = int(handle.metadata.num_rows)  # footer metadata: no row group is decoded
+        if "_captured_at" not in handle.schema_arrow.names:
+            return n_rows, ""
+        stamps = [
+            s for s in handle.read(columns=["_captured_at"]).column("_captured_at").to_pylist() if s
+        ]
+        # Stamps are normalized to '...+00:00' on write, so max() over the strings is chronological.
+        return n_rows, (max(stamps) if stamps else "")
 
     def write_parquet(self, key: str, df: pd.DataFrame) -> Path:
         path = self.path_for(key)
@@ -249,6 +275,45 @@ def _ordered(df: pd.DataFrame) -> pd.DataFrame:
     return df[[*payload, *RESERVED]]
 
 
+def _check_capture_integrity(fresh: pd.DataFrame, key_cols: Sequence[str], source: str) -> None:
+    """Warn when a capture's declared key does not actually identify its rows.
+
+    :func:`_dedup` collapses on ``key_cols`` + capture date, and pandas treats ``NaN == NaN`` when
+    deduping. Two shapes therefore lose real rows *silently*:
+
+    * a **null** in a key column — every null-keyed row in the capture folds into one;
+    * a **repeated key within one capture** — ``key_cols`` is not a key for this source. Seen in real
+      data: ``nflverse_injuries`` keyed without ``date_modified`` folded one player's *Questionable*
+      and *Out* reports for the same week into a single row, keeping whichever the provider happened
+      to list last — i.e. persisting a stale status and saying nothing.
+
+    Superseding an *earlier capture* of the same key is the intended point-in-time rule and is never
+    warned about; only loss *within* one capture is a defect. Warn rather than raise: real provider
+    feeds carry nulls, and a cron that hard-fails collects nothing at all. The reconciliation counts
+    in :func:`write_snapshot`'s log line make the loss auditable either way.
+    """
+    keys = list(key_cols)
+
+    nulls = fresh[keys].isna().any(axis=1)
+    if bool(nulls.any()):
+        _LOG.warning(
+            "%s: %d/%d rows carry a null in key column(s) %s — nulls compare equal when deduping, "
+            "so they collapse into one row. Widen key_cols or fix the collector.",
+            source, int(nulls.sum()), len(fresh), [c for c in keys if fresh[c].isna().any()],
+        )
+
+    dups = fresh.duplicated(subset=keys, keep=False)
+    if bool(dups.any()):
+        clashing = fresh.loc[dups, keys].drop_duplicates()
+        _LOG.warning(
+            "%s: key_cols %s do not identify rows within one capture — %d rows share %d key(s), so "
+            "%d row(s) are dropped as if superseded. Sample: %s. That is a collector/registry bug, "
+            "not point-in-time dedup.",
+            source, keys, int(dups.sum()), len(clashing), int(dups.sum()) - len(clashing),
+            clashing.head(_SAMPLE_KEYS).to_dict("records"),
+        )
+
+
 def _dedup(df: pd.DataFrame, key_cols: Sequence[str]) -> pd.DataFrame:
     """Keep the latest ``_captured_at`` per ``key_cols`` **per UTC capture date** (see module doc)."""
     stamps = pd.to_datetime(df["_captured_at"], utc=True, format="ISO8601")
@@ -317,15 +382,22 @@ def write_snapshot(
             f"(columns: {sorted(fresh.columns)[:20]})"
         )
     fresh = _attach_reserved(fresh, source=source, season=season, week=week, captured_at=stamp)
+    _check_capture_integrity(fresh, key_cols, source)
 
+    n_new, n_prior = len(fresh), 0
     if store.exists(key):
         prior = store.read_parquet(key)
         if not prior.empty:
+            n_prior = len(prior)
             fresh = pd.concat([prior, fresh], ignore_index=True)
 
     merged = _ordered(_dedup(fresh, key_cols))
     written = store.write_parquet(key, merged)
-    _LOG.info("%s season=%s week=%s: %d rows -> %s", source, season, week, len(merged), written)
+    # Reconcile rows in vs. rows out: a bare post-dedup count would hide every dropped row.
+    _LOG.info(
+        "%s season=%s week=%s: %d new + %d existing -> %d rows (%d superseded) -> %s",
+        source, season, week, n_new, n_prior, len(merged), n_new + n_prior - len(merged), written,
+    )
     return written
 
 
@@ -363,21 +435,25 @@ def read_source(
 
 
 def lake_inventory(*, backend: StorageBackend | None = None) -> pd.DataFrame:
-    """One row per partition: ``source, season, week, n_rows, path, latest_captured_at``."""
+    """One row per partition: ``source, season, week, n_rows, path, latest_captured_at``.
+
+    Goes through :meth:`StorageBackend.partition_summary`, so **no payload column is ever fetched** —
+    on a cloud backend this is a listing plus one small metadata read per partition, not a download
+    of the lake.
+    """
     store = _resolve(backend)
     rows: list[dict[str, Any]] = []
     for key in store.list_keys():
         source, season, week = _parse_key(key)
-        part = store.read_parquet(key)
-        stamps = part["_captured_at"].dropna() if "_captured_at" in part.columns else pd.Series([])
+        n_rows, latest = store.partition_summary(key)
         rows.append(
             {
                 "source": source,
                 "season": season,
                 "week": week,
-                "n_rows": len(part),
+                "n_rows": n_rows,
                 "path": str(store.path_for(key)),
-                "latest_captured_at": max(stamps) if len(stamps) else "",
+                "latest_captured_at": latest,
             }
         )
     inventory = pd.DataFrame(

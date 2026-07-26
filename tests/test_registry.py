@@ -79,6 +79,15 @@ def test_grains_match_the_shape_of_each_source():
     assert "week" in SOURCES["nflverse_player_week"].key_cols
 
 
+def test_injury_key_includes_the_report_revision():
+    """A player is listed twice in a week as the report firms up (Questionable -> Out).
+
+    Without ``date_modified`` those revisions share a key and one is silently dropped -- see
+    ``tests/test_store.py::test_injury_report_revisions_survive_the_registry_key``.
+    """
+    assert "date_modified" in SOURCES["nflverse_injuries"].key_cols
+
+
 def test_prelock_cadence_is_the_point_in_time_capture():
     prelock = {s.name for s in sources_for_cadence("prelock")}
     # The unrecoverable ones must be captured before lock, alongside the state-of-the-world context.

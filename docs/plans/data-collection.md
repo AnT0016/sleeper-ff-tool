@@ -152,9 +152,15 @@ def read_snapshot(source: str, season: int, week: int | None = None) -> pd.DataF
 def read_source(source: str, seasons: Iterable[int] | None = None) -> pd.DataFrame     # concat partitions
 def lake_inventory() -> pd.DataFrame  # one row per partition: source, season, week, n_rows, path, latest _captured_at
 ```
-Storage backend is behind a thin `StorageBackend` protocol (`write_parquet`/`read_parquet`/`exists`/
-`list`); `LocalParquetBackend` is the impl ticket 1 ships. Adding the S3 impl (ticket 9) means one new
-module + a config toggle, with zero changes to collectors or the assembler.
+Storage backend is behind a thin `StorageBackend` protocol — `write_parquet` / `read_parquet(key,
+columns=None)` / `exists` / `list_keys` / `partition_summary(key) -> (n_rows, latest_captured_at)`;
+`LocalParquetBackend` is the impl ticket 1 ships. Adding the S3 impl (ticket 9) means one new module +
+a config toggle, with zero changes to collectors or the assembler.
+
+`partition_summary` and the `columns=` projection are on the protocol deliberately: `lake_inventory()`
+needs only a row count and one timestamp per partition, and a backend that answered by materializing
+the object would make that call download the entire lake (630 objects for 10 seasons). Locally it is
+the parquet footer plus one column chunk; ticket 9 must keep it equally cheap.
 
 ### Source registry — `src/collect/registry.py`
 ```python
