@@ -33,10 +33,16 @@ whole phase exists to prevent. The outcome is one join away in ``nflverse_schedu
    * the moneylines agree on which side is favoured in **99.2%** of 2,756 non-pick'em games
      (the residual is pick'em-adjacent lines where the two markets disagree by a hair).
 
-   Worked example from the committed fixture — ``2024_01_BAL_KC``: ``total_line`` 46.0,
-   ``spread_line`` +3.0, ``home_moneyline`` -148 (KC favoured) -> KC 24.5, BAL 21.5, summing to
-   46.0. And ``2024_01_HOU_IND``: ``spread_line`` -3.0 with ``away_moneyline`` -155 -> HOU (away)
-   24.5, IND 21.5. ``tests/test_collect_market.py`` pins both directions.
+   Worked examples from the committed fixture, one favourite each way — and note the totals differ,
+   so neither split can be read off the other:
+
+   * ``2024_01_BAL_KC``: ``total_line`` 46.0, ``spread_line`` **+3.0**, ``home_moneyline`` -148
+     (KC, the home side, favoured) -> **KC 24.5, BAL 21.5**, summing to 46.0.
+   * ``2024_01_HOU_IND``: ``total_line`` 49.0, ``spread_line`` **-3.0**, ``away_moneyline`` -155
+     (HOU, the away side, favoured) -> **HOU 26.0, IND 23.0**, summing to 49.0.
+
+   ``tests/test_collect_market.py`` pins both directions, and they discriminate: inverting the
+   formula turns 6 tests red while the sum-to-``total_line`` test stays green.
 
 Games with no line yet are kept with null implied totals rather than dropped: on the forward
 schedule most of the season is unpriced in July (221 of 272 rows on the 2026 file today), and
