@@ -18,7 +18,13 @@ Every sample is chosen for a shape the collector must survive, not for volume:
 * ``depth`` — the modern (2025+) schema over two ``dt`` snapshots, plus a null-``gsis_id`` pair that
   collides on the registry key; and ``depth_legacy``, a pre-2025 frame for the fallback path.
 * ``schedules`` — a full week, so the Vegas (``spread_line``/``total_line``) and weather
-  (``roof``/``temp``/``wind``) columns ticket 4 reads are covered, domes included.
+  (``roof``/``temp``/``wind``) columns ticket 4 reads are covered, domes included. A played week, so
+  the market columns can be checked against the outcome (``result`` is ``home_score - away_score``,
+  which is what pins the ``spread_line`` sign).
+* ``schedules_intl`` — the **forward** schedule's awkward shapes, which a played season has none of:
+  international games carrying the *home team's* ``stadium_id`` and ``roof`` while only ``stadium``
+  names the real venue, retractable-roof games with ``roof`` still null, and unpriced games with a
+  null ``spread_line``/``total_line``.
 
 Run manually when refreshing the fixtures (mirrors ``scripts/make_fixture.py``); the tests never
 call the network.
@@ -47,6 +53,8 @@ OUT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "nflverse"
 SEASON = 2024
 #: First season of the rewritten depth-chart feed — the only shape the registry key addresses.
 DEPTH_SEASON = 2025
+#: An *unplayed* season, for the shapes only a forward schedule has (see ``schedules_intl``).
+FORWARD_SEASON = 2026
 
 POSITIONS = ("QB", "RB", "WR", "TE", "K")
 
@@ -122,6 +130,24 @@ def _depth() -> pl.DataFrame:
     return pl.concat([team, collision], how="vertical")
 
 
+def _schedules_intl() -> pl.DataFrame:
+    """Forward-schedule rows the played seasons cannot supply.
+
+    Three shapes, all of which ``collect.weather`` has to survive and none of which exist in a
+    finished season: an international game filed under the home team's ``stadium_id`` **and**
+    ``roof`` (so venue resolution must go by ``stadium`` name), a retractable-roof game whose
+    ``roof`` is still null because nobody knows yet, and a game with no line priced.
+    """
+    frame = load_schedules(FORWARD_SEASON)
+    neutral = frame.filter(pl.col("location") == "Neutral")
+    no_roof = frame.filter((pl.col("location") == "Home") & pl.col("roof").is_null()).head(3)
+    unpriced = frame.filter(pl.col("total_line").is_null()).head(3)
+    priced = frame.filter(pl.col("total_line").is_not_null()).head(3)
+    return pl.concat([neutral, no_roof, unpriced, priced], how="vertical").unique(
+        subset=["game_id"], maintain_order=True
+    )
+
+
 def _crosswalk() -> pl.DataFrame:
     frame = load_id_crosswalk()
     joinable = frame.filter(
@@ -139,6 +165,7 @@ def main() -> None:
         f"ff_opp_{SEASON}": _ff_opp(),
         f"injuries_{SEASON}": _injuries(),
         f"schedules_{SEASON}": load_schedules(SEASON).filter(pl.col("week") == 1),
+        f"schedules_intl_{FORWARD_SEASON}": _schedules_intl(),
         f"depth_{DEPTH_SEASON}": _depth(),
         f"depth_legacy_{SEASON}": load_depth_charts(SEASON).head(10),
         "id_crosswalk": _crosswalk(),
