@@ -18,7 +18,7 @@ from collect.registry import (
     backfillable_sources,
     sources_for_cadence,
 )
-from store.lake import RESERVED
+from store.lake import DEDUP_POLICIES, RESERVED
 
 #: The source list from docs/plans/data-collection.md -- one entry per collector in the spec.
 EXPECTED = {
@@ -156,6 +156,29 @@ def test_every_source_declares_a_known_content_known():
     assert {s.content_known for s in SOURCES.values()} <= set(CONTENT_KNOWN)
 
 
+# --------------------------------------------------------------------------- dedup policy (#15)
+def test_every_source_declares_a_known_dedup_policy():
+    assert {s.dedup for s in SOURCES.values()} <= set(DEDUP_POLICIES)
+
+
+def test_only_depth_departs_from_the_per_capture_date_default():
+    """``nflverse_depth`` is the *only* source keyed on its own observation timestamp (``dt``), so it
+    is the only immutable one — every other source can be revised in place and keeps the default."""
+    assert SOURCES["nflverse_depth"].dedup == "first_capture"
+    assert all(
+        source.dedup == "per_capture_date"
+        for name, source in SOURCES.items()
+        if name != "nflverse_depth"
+    )
+
+
+def test_injuries_keeps_per_capture_date_despite_being_a_cumulative_pre_lock_feed():
+    """#15's scope-reduction: #17 removed ``date_modified`` from the injury key, so an injury row is
+    genuinely revisable and the per-capture-date retention is now the *only* thing preserving the
+    Thursday-Questionable / Sunday-Out revision stream. It must not be swept into ``first_capture``."""
+    assert SOURCES["nflverse_injuries"].dedup == "per_capture_date"
+
+
 def test_schedules_is_post_game_despite_running_pre_lock():
     """The reason ``content_known`` exists at all — cadence is not knowability.
 
@@ -202,6 +225,7 @@ def test_source_accepts_a_valid_definition():
         ({"cadence": frozenset()}, "cadence must be non-empty"),
         ({"cadence": frozenset({"whenever"})}, "unknown cadence"),
         ({"content_known": "eventually"}, "content_known"),
+        ({"dedup": "keep_all"}, "dedup"),
         ({"cadence": frozenset({"backfill"})}, "contradicts cadence"),
         ({"backfillable": True}, "contradicts cadence"),
     ],

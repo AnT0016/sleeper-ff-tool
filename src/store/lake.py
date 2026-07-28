@@ -21,6 +21,14 @@ earlier one — that is what makes projection/injury *drift* observable rather t
 Finalized sources (completed-week actuals) converge to one row per key naturally, because they stop
 changing.
 
+That capture-date retention is the **default** policy (``per_capture_date``). A source whose natural
+key already carries its own observation timestamp — ``nflverse_depth.dt`` — declares ``first_capture``
+instead (:data:`DEDUP_POLICIES`, resolved from the registry): its rows are immutable, so a later
+capture of the cumulative feed records nothing new and only the earliest per key is kept. Without that
+policy, twice-weekly pre-lock captures multiply the partition by the capture count (#15). The policy
+changes *which capture survives*, never the set of distinct keys — so a downstream read that keys on
+the timestamp (the assembler's as-of position join on ``dt``) sees exactly the same rows either way.
+
 ``captured_at`` is always **passed in**, never read from the clock in here: a test must be able to
 write "Tuesday's" and "Sunday's" captures deterministically.
 
@@ -57,6 +65,15 @@ LAKE_ROOT: Path = _REPO_ROOT / "data_cache" / "lake"
 
 #: Provenance columns the store attaches to every row. Collectors must not emit these.
 RESERVED: tuple[str, ...] = ("_source", "_season", "_week", "_captured_at")
+
+#: The dedup policies :func:`_dedup` implements, declared per source as ``Source.dedup``. Defined
+#: here because the store owns the merge; ``collect.registry`` imports these to validate its
+#: declarations, exactly as it imports :data:`RESERVED`.
+DEDUP_POLICIES: tuple[str, ...] = ("per_capture_date", "first_capture")
+
+#: The policy a source keeps unless it declares otherwise — today's behaviour for every source but
+#: ``nflverse_depth`` (#15). Also the fallback for a ``source`` the registry does not know.
+DEFAULT_DEDUP: str = "per_capture_date"
 
 #: Backend selected by env (``local`` | ``s3``). Default keeps every run working with no credentials.
 LAKE_BACKEND: str = (os.environ.get("LAKE_BACKEND") or "local").strip().lower() or "local"
@@ -354,9 +371,28 @@ def _check_capture_integrity(fresh: pd.DataFrame, key_cols: Sequence[str], sourc
         )
 
 
-def _dedup(df: pd.DataFrame, key_cols: Sequence[str]) -> pd.DataFrame:
-    """Keep the latest ``_captured_at`` per ``key_cols`` **per UTC capture date** (see module doc)."""
+def _dedup(df: pd.DataFrame, key_cols: Sequence[str], policy: str) -> pd.DataFrame:
+    """Collapse a merged partition to one row per key, per the source's dedup ``policy``.
+
+    ``per_capture_date`` (the default) keeps the latest ``_captured_at`` per ``key_cols`` **per UTC
+    capture date**, so a later-day capture is a new point-in-time snapshot and a same-day re-run is
+    idempotent (see the module docstring). Right for anything the provider can revise in place.
+
+    ``first_capture`` keeps the **earliest** ``_captured_at`` per ``key_cols`` and ignores the capture
+    date. Right only for a source whose key already carries its own observation timestamp
+    (``nflverse_depth.dt``): such a row is immutable, so re-capturing the cumulative feed on a later
+    date records nothing new, and retaining a copy per capture date would multiply the partition by
+    the capture count (#15). The surviving stamp is the first time we observed the key — the more
+    honest point-in-time answer than an arbitrary later re-observation.
+    """
     stamps = pd.to_datetime(df["_captured_at"], utc=True, format="ISO8601")
+    if policy == "first_capture":
+        # Ascending sort + keep="first": the earliest capture of each key wins, and a later capture
+        # of an already-stored key is dropped rather than appended. Stable, so a same-instant re-run
+        # keeps the already-stored copy (idempotent), matching the per_capture_date branch below.
+        work = df.assign(_ts=stamps).sort_values("_ts", kind="stable")
+        work = work.drop_duplicates(subset=list(key_cols), keep="first")
+        return work.drop(columns=["_ts"]).reset_index(drop=True)
     work = df.assign(_ts=stamps, _capture_date=stamps.dt.strftime("%Y-%m-%d"))
     work = work.sort_values("_ts", kind="stable")  # stable: a same-instant re-capture wins over the
     work = work.drop_duplicates(  # already-stored copy, which is what makes a re-run idempotent
@@ -386,6 +422,7 @@ def write_snapshot(
     captured_at: str,
     week: int | None = None,
     key_cols: Sequence[str],
+    dedup: str | None = None,
     backend: StorageBackend | None = None,
 ) -> Path | str:
     """Merge ``rows`` into one partition, point-in-time deduped, written atomically.
@@ -393,6 +430,11 @@ def write_snapshot(
     ``key_cols`` is the row's natural key *within this source* (see ``collect.registry.SOURCES``);
     it must not include the reserved columns, and every name must exist in ``rows`` — a missing key
     column raises rather than silently deduping on the wrong thing (which would delete real rows).
+
+    ``dedup`` selects how repeat captures of a key collapse (see :func:`_dedup`). ``None`` — the
+    normal case — resolves the policy the registry **declares** for ``source``, so the policy sitting
+    beside ``key_cols`` is honoured by every caller rather than only the runner. An explicit value
+    (one of :data:`DEDUP_POLICIES`) overrides that, for tests and one-offs.
 
     Empty ``rows`` is a no-op: the path is returned but nothing is created or overwritten, so an
     off-season or failed collector never blanks a good partition.
@@ -413,6 +455,18 @@ def write_snapshot(
     if overlap:
         raise ValueError(f"{source}: key_cols must exclude reserved columns {overlap}")
 
+    if dedup is None:
+        # Resolve from the registry, imported here rather than at module scope: registry imports
+        # RESERVED from this module, so a top-level import would be circular (the same reason
+        # runner.plan_run imports analysis.snapshot inside the function). A source the registry does
+        # not know keeps the default, so write_snapshot stays usable for an ad-hoc/unregistered key.
+        from collect.registry import SOURCES
+
+        entry = SOURCES.get(source)
+        dedup = entry.dedup if entry is not None else DEFAULT_DEDUP
+    elif dedup not in DEDUP_POLICIES:
+        raise ValueError(f"{source}: unknown dedup policy {dedup!r}; known: {DEDUP_POLICIES}")
+
     stamp = normalize_captured_at(captured_at)
     fresh = pd.DataFrame(materialized)
     missing = [c for c in key_cols if c not in fresh.columns]
@@ -431,12 +485,18 @@ def write_snapshot(
             n_prior = len(prior)
             fresh = pd.concat([prior, fresh], ignore_index=True)
 
-    merged = _ordered(_dedup(fresh, key_cols))
+    merged = _ordered(_dedup(fresh, key_cols, dedup))
     written = store.write_parquet(key, merged)
-    # Reconcile rows in vs. rows out: a bare post-dedup count would hide every dropped row.
+    # Reconcile rows in vs. rows out: a bare post-dedup count would hide every dropped row. Name the
+    # side that was dropped, too, because it flips with the policy: per_capture_date keeps the fresh
+    # row and drops the stored one ("superseded"), while first_capture keeps the stored row and drops
+    # the fresh re-observation. "N superseded" on a first_capture cron would read as "the fresh
+    # capture replaced the stored data" -- the exact opposite of what happened.
+    dropped = n_new + n_prior - len(merged)
+    collapse = "re-observations dropped" if dedup == "first_capture" else "superseded"
     _LOG.info(
-        "%s season=%s week=%s: %d new + %d existing -> %d rows (%d superseded) -> %s",
-        source, season, week, n_new, n_prior, len(merged), n_new + n_prior - len(merged), written,
+        "%s season=%s week=%s: %d new + %d existing -> %d rows (%d %s) -> %s",
+        source, season, week, n_new, n_prior, len(merged), dropped, collapse, written,
     )
     return written
 
