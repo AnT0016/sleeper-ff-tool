@@ -478,10 +478,21 @@ def _unreachable_message(sources: Iterable[str], seasons: Sequence[int]) -> str:
 
 # --------------------------------------------------------------------------- completed-week resolver
 def _ensure_utc(now: datetime | None) -> datetime:
-    """A tz-aware UTC ``now``. ``None`` -> the wall clock (only the untested safety-net path)."""
-    now = now or datetime.now(timezone.utc)
+    """A tz-aware UTC ``now``; ``None`` reads the wall clock.
+
+    A **naive** datetime raises rather than being read as UTC. Coercing looks harmless and is not:
+    ``datetime.now()`` in this project's own timezone (CEST) is two hours ahead of UTC, and two hours
+    is enough to settle a week whose last game is still being played. The one caller that matters
+    passes an aware UTC ``now`` down from ``scripts/collect.py``, so a naive one is a programming
+    error and should read as one.
+    """
+    if now is None:
+        return datetime.now(timezone.utc)
     if now.tzinfo is None:
-        return now.replace(tzinfo=timezone.utc)
+        raise ValueError(
+            f"naive datetime {now!r}: the completed-week resolver needs a tz-aware moment, and "
+            "reading a local clock as UTC can settle a week that is still being played"
+        )
     return now.astimezone(timezone.utc)
 
 
@@ -533,15 +544,25 @@ def _week_statuses(schedules: pl.DataFrame | None, now: datetime) -> list[tuple[
     return statuses
 
 
+def _finished_week(statuses: Sequence[tuple[int, bool, str]]) -> int | None:
+    """The highest week reported finished, or ``None``. Shared so the resolver the runner uses and
+    the one :func:`latest_completed_week` documents cannot drift apart."""
+    return max((week for week, ok, _ in statuses if ok), default=None)
+
+
 def latest_completed_week(schedules: pl.DataFrame | None, now: datetime) -> int | None:
     """Highest REG week whose games have all *finished* by ``now`` — the postgame capture week.
 
     Why a kickoff-time rule and not a result-based one ("the week is done when every game has a
-    score"): ``nflreadpy`` caches the schedule frame for 24h, so a Tuesday run can be handed a copy
-    fetched before Sunday's games. That stale frame still carries the correct *future kickoff times*
-    — those are fixed when the schedule is published — but its result columns are stale nulls, so an
-    "all games have a score" rule would call a just-played week unfinished and resolve to the week
-    before. Kickoff times are stable under the cache; results are not.
+    score"): a result-based rule asks *has nflverse published the scores yet*, which makes the
+    capture week a function of a third party's publishing latency — the same kind of data-arrival
+    race this ticket exists to remove, just moved from Sleeper's clock to nflverse's. Kickoff times
+    are fixed when the schedule is published, so they answer the question without asking anyone
+    whether they have finished writing. The caching layer sharpens the point: ``data.nflverse`` runs
+    ``nflreadpy`` with a 24h filesystem cache, so a local Tuesday run can be handed a frame fetched
+    before Sunday's games — correct kickoff times, stale null results. (A cold GitHub Actions runner
+    starts with an empty cache today, but that stops being true the moment ticket 6 caches
+    ``data_cache/nflverse_cache`` to save bandwidth.)
 
     *Finished*, not merely *kicked off*: a game counts only once ``kickoff + _POSTGAME_SETTLE_HOURS
     <= now``, because an NFL game runs ~3.5h and the rule has to stay correct if the cron time moves
@@ -556,8 +577,7 @@ def latest_completed_week(schedules: pl.DataFrame | None, now: datetime) -> int 
 
     ``None`` when no REG week has finished yet (start of season) or the schedule cannot be read.
     """
-    finished = [week for week, ok, _ in _week_statuses(schedules, now) if ok]
-    return max(finished) if finished else None
+    return _finished_week(_week_statuses(schedules, now))
 
 
 # --------------------------------------------------------------------------- CLI helpers
@@ -610,7 +630,7 @@ def plan_run(
     state = state or {}
     if not state and season is None and week is None:
         raise ValueError(
-            "could not determine the current season/week (Sleeper state unreachable) — aborting "
+            "could not determine the current season/week (Sleeper state unreachable) - aborting "
             "the scheduled capture; pass --season/--week to run anyway"
         )
     resolved_season = int(season if season is not None else state.get("season") or 0)
@@ -622,7 +642,7 @@ def plan_run(
         return RunPlan(resolved_season, fallback_week, reason)
     if resolved_season <= 0:
         raise ValueError(
-            f"Sleeper state carries no usable season ({state.get('season')!r}) — pass --season "
+            f"Sleeper state carries no usable season ({state.get('season')!r}) - pass --season "
             "rather than capture into a season=0 partition"
         )
 
@@ -646,6 +666,15 @@ def _postgame_plan(
     The schedule comes from ``ctx`` so the load is shared with the run's ``nflverse_schedules``
     collector. A load failure or a season with no finished week is a **skip**, not a guess: see
     :func:`plan_run` for why falling back to the upcoming week would be the defect this exists to fix.
+
+    Two things are logged, and the second is the one that is easy to leave out. Resolving the
+    *highest* finished week means an earlier week can be stepped over — a game postponed past the
+    cron, or an ``gametime`` nflverse had not filled in on the Tuesday that week was current. Once
+    the resolver has moved past it that week is finished too, so it never appears in the
+    "next week rejected" line and the run reads as clean while its live ``sleeper_stats_week``
+    capture was never taken. A week below the resolved one is therefore reported on its own, as a
+    WARNING, because it is actionable (``--week N`` recovers it) — and it fires only when there is
+    actually a gap, so a normal run stays silent.
     """
     now = _ensure_utc(now)
     try:
@@ -653,14 +682,14 @@ def _postgame_plan(
     except Exception as exc:  # noqa: BLE001 - a missing schedule must skip, never guess the week
         skip = (
             f"the {season} schedule is unavailable ({type(exc).__name__}: {exc}), so the completed "
-            "week cannot be resolved; every postgame source is backfillable — re-run with --week "
+            "week cannot be resolved; every postgame source is backfillable - re-run with --week "
             "once the schedule is published"
         )
         _LOG.warning("postgame plan skipped: %s", skip)
         return RunPlan(season, fallback_week, skip)
 
     statuses = _week_statuses(schedules, now)
-    resolved = max((week for week, ok, _ in statuses if ok), default=None)
+    resolved = _finished_week(statuses)
     if resolved is None:
         why = statuses[0][2] if statuses else "the schedule carries no REG games"
         skip = (
@@ -671,13 +700,23 @@ def _postgame_plan(
         return RunPlan(season, fallback_week, skip)
 
     rejected = next(
-        (f"week {week} rejected — {why}" for week, ok, why in statuses if not ok and week > resolved),
+        (f"week {week} rejected - {why}" for week, ok, why in statuses if not ok and week > resolved),
         "no later week is scheduled",
     )
     _LOG.info(
         "postgame plan: season %s -> completed week %s (from the schedule, not Sleeper state); "
         "next %s", season, resolved, rejected,
     )
+    # Weeks the resolver stepped over. Silent in the normal case; a WARNING when there is a gap,
+    # because nothing else in the run would ever mention it (see the docstring).
+    stepped_over = [week for week, ok, _ in statuses if not ok and week < resolved]
+    if stepped_over:
+        _LOG.warning(
+            "postgame plan: season %s REG week(s) %s are below the resolved week %s, so they were "
+            "never captured live - re-run with --week to recover each of them (%s)",
+            season, stepped_over, resolved,
+            "; ".join(f"week {w}: {why}" for w, ok, why in statuses if not ok and w < resolved),
+        )
     return RunPlan(season, resolved, None)
 
 

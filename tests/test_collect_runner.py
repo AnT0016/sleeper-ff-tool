@@ -768,6 +768,53 @@ def test_latest_completed_week_is_none_when_no_week_has_finished():
     assert runner.latest_completed_week(None, _TUE_NOON_UTC) is None
 
 
+#: Week 15 has a game nflverse has not published a kickoff time for, so the resolver steps over it
+#: and lands on 16. The "next week rejected" line cannot mention 15 — it only looks *above* the
+#: resolved week — so without a dedicated report the skipped week is invisible in the cron log.
+_GAP_SCHEDULE = (
+    (14, "2026-12-13", "13:00"),
+    (15, "2026-12-20", "13:00"),
+    (15, "2026-12-21", ""),  # unflexed: no kickoff time published
+    (16, "2026-12-27", "13:00"),
+)
+_AFTER_WEEK_16 = datetime(2026, 12, 29, 12, 0, tzinfo=timezone.utc)
+
+
+def test_a_week_the_resolver_stepped_over_is_reported(caplog):
+    """A gap *below* the resolved week is the one skip nothing else in the run would ever mention.
+
+    ``sleeper_stats_week`` for week 15 is never captured live here. It is recoverable (the source is
+    backfillable), but only by someone who knows it was missed — so the plan says so, at WARNING,
+    with the week number the ``--week`` re-run needs.
+    """
+    ctx, _ = _schedule_ctx(_schedule(_GAP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 17}
+    with caplog.at_level(logging.WARNING, logger="collect.runner"):
+        plan = runner.plan_run(state, mode="postgame", now=_AFTER_WEEK_16, ctx=ctx)
+    assert (plan.week, plan.skip) == (16, None)
+    assert "[15]" in caplog.text and "--week" in caplog.text
+
+
+def test_a_postgame_plan_with_no_gap_warns_about_nothing(caplog):
+    """The other half of the pair: the report must not fire on an ordinary run.
+
+    A capture whose log is noisy on the normal path is a capture whose warnings stop being read —
+    the same discipline ``collect.nflverse._identified`` exists to protect.
+    """
+    ctx, _ = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 2}
+    with caplog.at_level(logging.WARNING, logger="collect.runner"):
+        runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, ctx=ctx)
+    assert caplog.text == ""
+
+
+def test_a_naive_now_is_rejected_rather_than_read_as_utc():
+    """Reading a local clock as UTC can settle a week that is still being played (CEST is +2)."""
+    schedule = _schedule(_FLIP_SCHEDULE)
+    with pytest.raises(ValueError, match="naive datetime"):
+        runner.latest_completed_week(schedule, datetime(2026, 9, 15, 12, 0))
+
+
 def test_format_summary_of_nothing():
     assert "no sources" in runner.format_summary([])
 
@@ -785,6 +832,26 @@ def test_collect_cli_captures_and_reports_per_source(offline, lake, monkeypatch,
     for source in sources_for_cadence("postgame"):
         assert source.name in out
     assert "rows" in out and _partitions(lake)
+
+
+@pytest.mark.parametrize("mode", ["prelock", "postgame"])
+def test_collect_cli_loads_the_season_schedule_once(offline, lake, monkeypatch, capsys, mode):
+    """One ``RunContext`` for the whole run — the module docstring's third core property.
+
+    ``postgame`` is why this needs pinning: resolving the completed week gave the schedule a *second*
+    load site (``plan_run``), and it is shared with the collectors only because ``scripts/collect.py``
+    builds one context and passes it to both. Letting ``run_cadence`` fall back to its own default
+    context would double every postgame run's schedule fetch, silently — the run would still be
+    green and every other assertion in this file would still pass.
+    """
+    cli = _load_cli("collect")
+    monkeypatch.setattr(
+        cli.client, "get_state", lambda *a, **k: {"season": str(SEASON), "season_type": "regular",
+                                                  "week": WEEK}
+    )
+    assert cli.main(["--mode", mode]) == 0
+    capsys.readouterr()
+    assert offline["schedules"] == 1
 
 
 def test_collect_cli_no_ops_in_the_off_season(offline, lake, monkeypatch, capsys):
