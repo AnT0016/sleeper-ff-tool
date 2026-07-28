@@ -66,11 +66,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"warning: could not read Sleeper state ({type(exc).__name__}: {exc})")
         state = {}
 
+    # One clock reading for the whole run: it dates the capture *and* decides, for a postgame run,
+    # which NFL week has finished (plan_run derives the completed week from the schedule as of now).
+    now = datetime.now(timezone.utc)
+    # One RunContext, shared by plan_run and run_cadence, so the season schedule a postgame plan
+    # reads is the same object the nflverse_schedules collector writes — loaded at most once.
+    ctx = runner.RunContext()
+
     try:
         # ImportError too: plan_run imports analysis.snapshot lazily (it drags in the whole
         # optimizer/pulp stack), so a broken install there would otherwise escape as a traceback
         # rather than the actionable one-liner a cron log wants.
-        plan = runner.plan_run(state, season=args.season, week=args.week)
+        plan = runner.plan_run(
+            state, mode=args.mode, now=now, season=args.season, week=args.week, ctx=ctx
+        )
     except (ValueError, ImportError) as exc:
         # A scheduled run must never guess the week: the forward-only sources would be filed under
         # the wrong partition, and that week is then gone for good. Fail red so the cron surfaces it.
@@ -82,12 +91,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Skipping the {args.mode} capture — {plan.skip}.")
         return 0
 
-    captured_at = datetime.now(timezone.utc).isoformat()
+    captured_at = now.isoformat()
     print(
         f"{args.mode} capture — {plan.season} Week {plan.week} "
         f"(captured_at {captured_at}, backend {LAKE_BACKEND})"
     )
-    results = runner.run_cadence(args.mode, plan.season, plan.week, captured_at=captured_at)
+    results = runner.run_cadence(args.mode, plan.season, plan.week, captured_at=captured_at, ctx=ctx)
     print(runner.format_summary(results))
     return runner.exit_code(results)
 

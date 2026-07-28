@@ -32,6 +32,7 @@ import logging
 import subprocess
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -620,6 +621,200 @@ def test_plan_run_refuses_a_state_with_no_season():
         runner.plan_run({"season_type": "regular", "week": 3})
 
 
+# --------------------------------------------------------------------------- postgame week (#16)
+#: A two-week REG schedule. Week 1 ends Monday 2026-09-14 20:15 ET (= Tue 00:15 UTC); week 2 opens
+#: Thursday 2026-09-17 20:15 ET (= Fri 00:15 UTC). Nothing else changes between the two states below.
+_FLIP_SCHEDULE = (
+    (1, "2026-09-10", "20:15"),  # Thu
+    (1, "2026-09-13", "13:00"),  # Sun
+    (1, "2026-09-14", "20:15"),  # Mon — week 1's last kickoff
+    (2, "2026-09-17", "20:15"),  # Thu — week 2's first kickoff
+    (2, "2026-09-20", "13:00"),  # Sun
+)
+#: Tuesday 12:00 UTC, the planned postgame cron: after week 1 settled (Mon kickoff + 6h = 06:15 UTC),
+#: before week 2 even kicks off. This is exactly when Sleeper's ``state.week`` flips to the upcoming
+#: week, so it is the moment the naive resolver races.
+_TUE_NOON_UTC = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def _schedule(rows):
+    """A minimal REG schedule frame from ``(week, gameday, gametime)`` triples."""
+    return pl.DataFrame(
+        {
+            "game_type": ["REG"] * len(rows),
+            "week": [int(w) for w, _, _ in rows],
+            "gameday": [d for _, d, _ in rows],
+            "gametime": [t for _, _, t in rows],
+        },
+        schema={"game_type": pl.Utf8, "week": pl.Int64, "gameday": pl.Utf8, "gametime": pl.Utf8},
+    )
+
+
+def _schedule_ctx(frame):
+    """A ``RunContext`` whose schedule loader returns ``frame`` and counts how often it is called."""
+    calls = Counter()
+
+    def load(season, *args, **kwargs):
+        calls["load"] += 1
+        return frame
+
+    return runner.RunContext(load_schedules=load), calls
+
+
+@pytest.mark.parametrize("state_week", [1, 2])
+def test_postgame_resolves_the_completed_week_across_the_tuesday_flip(state_week):
+    """The headline fix: same schedule, ``state.week`` = N and N+1, postgame resolves N both times.
+
+    ``state_week=1`` is the run landing before Sleeper's Tuesday rollover; ``2`` is after it. The
+    naive resolver would file week 2 (a zeroed, not-yet-played snapshot) in the second case.
+    """
+    ctx, _ = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": state_week}
+    plan = runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, ctx=ctx)
+    assert (plan.season, plan.week, plan.skip) == (2026, 1, None)
+
+
+def test_prelock_still_captures_the_upcoming_week():
+    """``prelock`` is unchanged: it keeps ``state.week`` (the upcoming week) and never reads the schedule."""
+    ctx, calls = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 2}
+    plan = runner.plan_run(state, mode="prelock", now=_TUE_NOON_UTC, ctx=ctx)
+    assert (plan.season, plan.week, plan.skip) == (2026, 2, None)
+    assert calls["load"] == 0
+
+
+def test_an_explicit_week_overrides_postgame_without_reading_the_schedule():
+    """``--season/--week`` still wins over everything — the schedule is not even consulted."""
+    ctx, calls = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 2}
+    plan = runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, season=2025, week=9, ctx=ctx)
+    assert (plan.season, plan.week, plan.skip) == (2025, 9, None)
+    assert calls["load"] == 0
+
+
+def test_the_resolved_postgame_week_and_the_next_rejection_are_logged(caplog):
+    """A wrong answer must be visible in the cron log, not only in the data."""
+    ctx, _ = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 2}
+    with caplog.at_level(logging.INFO, logger="collect.runner"):
+        runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, ctx=ctx)
+    assert "completed week 1" in caplog.text
+    assert "week 2 rejected" in caplog.text
+
+
+def test_an_off_season_postgame_returns_before_touching_the_schedule():
+    """Off-season is decided first: next season's schedule is often unpublished and must not load."""
+    ctx, calls = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "pre", "week": 0}
+    plan = runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, ctx=ctx)
+    assert plan.skip and "off-season" in plan.skip
+    assert calls["load"] == 0
+
+
+def test_a_postgame_schedule_load_failure_skips_rather_than_captures(caplog):
+    """An unresolvable week is a green skip, never a fall back to the upcoming ``state.week``."""
+    def boom(season, *args, **kwargs):
+        raise OSError("nflverse release is unreachable")
+
+    ctx = runner.RunContext(load_schedules=boom)
+    state = {"season": "2026", "season_type": "regular", "week": 2}
+    with caplog.at_level(logging.WARNING, logger="collect.runner"):
+        plan = runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, ctx=ctx)
+    assert plan.season == 2026
+    assert plan.skip and "schedule is unavailable" in plan.skip
+
+
+def test_a_postgame_run_before_any_week_has_finished_skips():
+    """Regular season declared but no REG week settled yet -> nothing to capture, so skip."""
+    ctx, _ = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 1}
+    before_kickoff = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)  # before week 1's Thursday game
+    plan = runner.plan_run(state, mode="postgame", now=before_kickoff, ctx=ctx)
+    assert plan.skip and "has finished" in plan.skip
+
+
+def test_latest_completed_week_requires_games_to_have_finished_not_just_started():
+    """``kicked off`` is not ``finished``: a game counts only after the settle margin, not at kickoff."""
+    schedule = _schedule([
+        (1, "2026-09-13", "13:00"),  # Sun 13:00 ET = 17:00 UTC, long finished
+        (2, "2026-09-20", "13:00"),  # Sun 13:00 ET = 17:00 UTC, +6h settle -> 23:00 UTC
+    ])
+    just_after_kickoff = datetime(2026, 9, 20, 18, 0, tzinfo=timezone.utc)  # 1h in, < 6h settle
+    assert runner.latest_completed_week(schedule, just_after_kickoff) == 1
+    past_the_settle = datetime(2026, 9, 21, 0, 0, tzinfo=timezone.utc)
+    assert runner.latest_completed_week(schedule, past_the_settle) == 2
+
+
+def test_latest_completed_week_treats_an_unreadable_kickoff_as_not_finished():
+    """A week with any blank ``gametime`` (nflverse's unflexed late games) is not complete.
+
+    Dropping the ``None`` kickoffs before ``max()`` would mark an unstarted week finished — the bug
+    the resolver must avoid. Here week 2 has a readable game months in the past *and* a blank one, so
+    the week resolves to 1 however late ``now`` is.
+    """
+    schedule = _schedule([
+        (1, "2026-09-13", "13:00"),
+        (2, "2026-09-20", "13:00"),
+        (2, "2026-09-21", ""),  # unflexed: no kickoff time published yet
+    ])
+    months_later = datetime(2026, 12, 1, 0, 0, tzinfo=timezone.utc)
+    assert runner.latest_completed_week(schedule, months_later) == 1
+
+
+def test_latest_completed_week_is_none_when_no_week_has_finished():
+    schedule = _schedule(_FLIP_SCHEDULE)
+    before_the_season = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+    assert runner.latest_completed_week(schedule, before_the_season) is None
+    assert runner.latest_completed_week(None, _TUE_NOON_UTC) is None
+
+
+#: Week 15 has a game nflverse has not published a kickoff time for, so the resolver steps over it
+#: and lands on 16. The "next week rejected" line cannot mention 15 — it only looks *above* the
+#: resolved week — so without a dedicated report the skipped week is invisible in the cron log.
+_GAP_SCHEDULE = (
+    (14, "2026-12-13", "13:00"),
+    (15, "2026-12-20", "13:00"),
+    (15, "2026-12-21", ""),  # unflexed: no kickoff time published
+    (16, "2026-12-27", "13:00"),
+)
+_AFTER_WEEK_16 = datetime(2026, 12, 29, 12, 0, tzinfo=timezone.utc)
+
+
+def test_a_week_the_resolver_stepped_over_is_reported(caplog):
+    """A gap *below* the resolved week is the one skip nothing else in the run would ever mention.
+
+    ``sleeper_stats_week`` for week 15 is never captured live here. It is recoverable (the source is
+    backfillable), but only by someone who knows it was missed — so the plan says so, at WARNING,
+    with the week number the ``--week`` re-run needs.
+    """
+    ctx, _ = _schedule_ctx(_schedule(_GAP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 17}
+    with caplog.at_level(logging.WARNING, logger="collect.runner"):
+        plan = runner.plan_run(state, mode="postgame", now=_AFTER_WEEK_16, ctx=ctx)
+    assert (plan.week, plan.skip) == (16, None)
+    assert "[15]" in caplog.text and "--week" in caplog.text
+
+
+def test_a_postgame_plan_with_no_gap_warns_about_nothing(caplog):
+    """The other half of the pair: the report must not fire on an ordinary run.
+
+    A capture whose log is noisy on the normal path is a capture whose warnings stop being read —
+    the same discipline ``collect.nflverse._identified`` exists to protect.
+    """
+    ctx, _ = _schedule_ctx(_schedule(_FLIP_SCHEDULE))
+    state = {"season": "2026", "season_type": "regular", "week": 2}
+    with caplog.at_level(logging.WARNING, logger="collect.runner"):
+        runner.plan_run(state, mode="postgame", now=_TUE_NOON_UTC, ctx=ctx)
+    assert caplog.text == ""
+
+
+def test_a_naive_now_is_rejected_rather_than_read_as_utc():
+    """Reading a local clock as UTC can settle a week that is still being played (CEST is +2)."""
+    schedule = _schedule(_FLIP_SCHEDULE)
+    with pytest.raises(ValueError, match="naive datetime"):
+        runner.latest_completed_week(schedule, datetime(2026, 9, 15, 12, 0))
+
+
 def test_format_summary_of_nothing():
     assert "no sources" in runner.format_summary([])
 
@@ -637,6 +832,26 @@ def test_collect_cli_captures_and_reports_per_source(offline, lake, monkeypatch,
     for source in sources_for_cadence("postgame"):
         assert source.name in out
     assert "rows" in out and _partitions(lake)
+
+
+@pytest.mark.parametrize("mode", ["prelock", "postgame"])
+def test_collect_cli_loads_the_season_schedule_once(offline, lake, monkeypatch, capsys, mode):
+    """One ``RunContext`` for the whole run — the module docstring's third core property.
+
+    ``postgame`` is why this needs pinning: resolving the completed week gave the schedule a *second*
+    load site (``plan_run``), and it is shared with the collectors only because ``scripts/collect.py``
+    builds one context and passes it to both. Letting ``run_cadence`` fall back to its own default
+    context would double every postgame run's schedule fetch, silently — the run would still be
+    green and every other assertion in this file would still pass.
+    """
+    cli = _load_cli("collect")
+    monkeypatch.setattr(
+        cli.client, "get_state", lambda *a, **k: {"season": str(SEASON), "season_type": "regular",
+                                                  "week": WEEK}
+    )
+    assert cli.main(["--mode", mode]) == 0
+    capsys.readouterr()
+    assert offline["schedules"] == 1
 
 
 def test_collect_cli_no_ops_in_the_off_season(offline, lake, monkeypatch, capsys):
