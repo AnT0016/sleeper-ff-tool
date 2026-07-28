@@ -61,6 +61,19 @@ jobs:
       LAKE_S3_SECRET_ACCESS_KEY: ${{ secrets.LAKE_S3_SECRET_ACCESS_KEY }}
       LAKE_S3_BUCKET: ${{ secrets.LAKE_S3_BUCKET }}
     steps:
+      # The last silent-loss path in the pipeline, and the only one not closed in code. A mistyped
+      # LAKE_BACKEND raises (store/lake.py: "unknown LAKE_BACKEND"), and a missing LAKE_S3_* raises
+      # S3ConfigError (#20) -- but an ABSENT LAKE_BACKEND resolves to the local-parquet dev backend,
+      # which would write every partition to this runner's disk, print a healthy row count, exit 0,
+      # and be destroyed with the runner. Green every Thursday and Sunday, capturing nothing, with
+      # the forward-only projections unrecoverable each time. Two lines make that impossible.
+      - name: Refuse to run against anything but the bucket
+        run: |
+          if [ "$LAKE_BACKEND" != "s3" ]; then
+            echo "::error::LAKE_BACKEND=$LAKE_BACKEND - this capture would write to the runner's disk and be discarded with it; forward-only rows would be lost silently"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -75,15 +88,19 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -e .
 
       - name: Capture pre-lock snapshot
-        # Dispatch inputs are read through env, never spliced into the run script (avoids the shell
-        # script-injection anti-pattern). Scheduled runs leave both blank, so nothing is ever pinned —
-        # collect.py auto-detects season/week. argparse validates --season/--week as ints.
+        # Dispatch inputs are read through env, never spliced into the run script (the shell
+        # script-injection anti-pattern). They are also collected into an ARRAY and expanded quoted:
+        # an unquoted "$ARGS" string splits on whitespace, so an input of `1 --mode postgame` would
+        # inject a second flag rather than a bad week, and argparse would take the last --mode. Only
+        # a collaborator can dispatch, so that was never a vulnerability -- but the array costs
+        # nothing and removes the need to reason about it. Scheduled runs leave both blank, so
+        # nothing is ever pinned and collect.py auto-detects season/week.
         env:
           WEEK: ${{ github.event.inputs.week }}
           SEASON: ${{ github.event.inputs.season }}
         run: |
-          ARGS="--mode prelock"
-          if [ -n "$SEASON" ]; then ARGS="$ARGS --season $SEASON"; fi
-          if [ -n "$WEEK" ]; then ARGS="$ARGS --week $WEEK"; fi
-          echo "Running: scripts/collect.py $ARGS"
-          python scripts/collect.py $ARGS
+          ARGS=(--mode prelock)
+          if [ -n "$SEASON" ]; then ARGS+=(--season "$SEASON"); fi
+          if [ -n "$WEEK" ]; then ARGS+=(--week "$WEEK"); fi
+          echo "Running: scripts/collect.py ${ARGS[*]}"
+          python scripts/collect.py "${ARGS[@]}"
