@@ -33,6 +33,10 @@ dev = [
     # localhost moto *server* because it intercepts below botocore, so the tests can assert which
     # byte ranges were requested -- which is how the cheap-metadata guarantees are actually pinned.
     "moto[s3]>=5.0",
+    # tests/test_workflows.py parses .github/workflows/*.yml. Declared rather than leaned on as a
+    # transitive of moto: the collection crons are config, so the only thing that can hold them to
+    # their contract is a test that reads them, and it must not depend on an undeclared import.
+    "pyyaml>=6.0",
 ]
 
 # src/ layout: each subdirectory (sleeper, scoring, data, ...) is its own

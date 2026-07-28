@@ -1,0 +1,102 @@
+name: Collect — post-game snapshot
+
+# Captures the finalized week: actuals, usage/snaps, opportunity — the label side of the dataset. Runs
+# scripts/collect.py, which reads which sources belong to the "postgame" cadence from collect.registry
+# and, per #16, resolves the completed week from the SEASON SCHEDULE (the highest REG week whose games
+# have all finished, kickoff + 6h <= now) — NOT Sleeper's state.week, which flips to the upcoming week
+# early Tuesday and would race this cron. Rows land in the S3 lake (Backblaze B2), never in git.
+#
+# No --week is passed on the scheduled path (see below): a hardcoded week would pin every Tuesday to
+# one number forever and defeat #16. An unresolvable week (schedule unloadable, or no finished week yet)
+# is a GREEN skip — collect.py prints "Skipping …" and exits 0 — so this workflow adds no
+# grep-for-"Skipping" logic that would misread that clean skip as a failure.
+on:
+  schedule:
+    # Minutes offset to :20 to dodge the congested top-of-hour Actions slot; the pinned 12:00 UTC hour
+    # sits after the week settles and before the 18:00 UTC season.db refresh (refresh.yml).
+    - cron: "20 12 * * 2"   # Tuesday ~12:00 UTC
+  workflow_dispatch:
+    inputs:
+      week:
+        description: >-
+          NFL week (1-18). Leave blank to auto-detect the completed week from the schedule. Set this
+          only to re-run a week the resolver stepped over — that run's log names the week and the
+          --week re-run that recovers it (sleeper_stats_week is backfillable, so this is a real fix).
+        required: false
+        type: string
+      season:
+        description: "Season year. Leave blank to auto-detect."
+        required: false
+        type: string
+
+# Least privilege: the job only needs to check the repo out. It writes to the S3 bucket, not the repo —
+# there is no git add/commit/push step — so contents: read is all actions/checkout requires.
+permissions:
+  contents: read
+
+# Shares the SAME literal group as collect-prelock.yml so at most one lake capture runs repo-wide:
+# store.write_snapshot is read-modify-write on a partition, and a manual dispatch could otherwise land
+# on the other workflow and lose an update. cancel-in-progress: false so an in-flight capture is never
+# thrown away mid-write.
+concurrency:
+  group: lake-capture
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    # nflverse_depth is the ~858MB source and streamlit is a base dependency (heavier install), so give
+    # the run real headroom.
+    timeout-minutes: 30
+    # LAKE_BACKEND=s3 sends every write to Backblaze B2; the four LAKE_S3_* values are Actions secrets
+    # (LAKE_S3_REGION is optional — store/s3.py derives it from the endpoint host).
+    env:
+      LAKE_BACKEND: s3
+      LAKE_S3_ENDPOINT: ${{ secrets.LAKE_S3_ENDPOINT }}
+      LAKE_S3_ACCESS_KEY_ID: ${{ secrets.LAKE_S3_ACCESS_KEY_ID }}
+      LAKE_S3_SECRET_ACCESS_KEY: ${{ secrets.LAKE_S3_SECRET_ACCESS_KEY }}
+      LAKE_S3_BUCKET: ${{ secrets.LAKE_S3_BUCKET }}
+    steps:
+      # The last silent-loss path in the pipeline, and the only one not closed in code. A mistyped
+      # LAKE_BACKEND raises (store/lake.py: "unknown LAKE_BACKEND"), and a missing LAKE_S3_* raises
+      # S3ConfigError (#20) -- but an ABSENT LAKE_BACKEND resolves to the local-parquet dev backend,
+      # which would write every partition to this runner's disk, print a healthy row count, exit 0,
+      # and be destroyed with the runner. Green every Tuesday, capturing nothing. Two lines make
+      # that impossible.
+      - name: Refuse to run against anything but the bucket
+        run: |
+          if [ "$LAKE_BACKEND" != "s3" ]; then
+            echo "::error::LAKE_BACKEND=$LAKE_BACKEND - this capture would write to the runner's disk and be discarded with it; the week's rows would be lost silently"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - name: Capture post-game snapshot
+        # Dispatch inputs are read through env, never spliced into the run script (the shell
+        # script-injection anti-pattern). They are also collected into an ARRAY and expanded quoted:
+        # an unquoted "$ARGS" string splits on whitespace, so an input of `1 --mode prelock` would
+        # inject a second flag rather than a bad week, and argparse would take the last --mode. Only
+        # a collaborator can dispatch, so that was never a vulnerability -- but the array costs
+        # nothing and removes the need to reason about it. Scheduled runs leave both blank, so #16's
+        # schedule-based week resolver decides the week and nothing is pinned.
+        env:
+          WEEK: ${{ github.event.inputs.week }}
+          SEASON: ${{ github.event.inputs.season }}
+        run: |
+          ARGS=(--mode postgame)
+          if [ -n "$SEASON" ]; then ARGS+=(--season "$SEASON"); fi
+          if [ -n "$WEEK" ]; then ARGS+=(--week "$WEEK"); fi
+          echo "Running: scripts/collect.py ${ARGS[*]}"
+          python scripts/collect.py "${ARGS[@]}"
