@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from store.lake import RESERVED
+from store.lake import DEDUP_POLICIES, DEFAULT_DEDUP, RESERVED
 
 #: Row grains a source may declare.
 GRAINS: tuple[str, ...] = ("week", "season", "game")
@@ -78,6 +78,26 @@ class Source:
     #: does not — its post-game columns are the outcome itself, and ``vegas_odds`` already exposes
     #: the sanctioned pre-game view of the same feed.
     content_known: Literal["pre_kickoff", "post_game", "row_timestamp"]
+    #: How the store collapses repeat captures of one key (implemented by ``store.lake._dedup``):
+    #:
+    #: * ``per_capture_date`` (default) — keep the latest row per key **per UTC capture date**, so a
+    #:   later-day capture is a new point-in-time snapshot. Right for any source the provider can
+    #:   revise in place (a corrected stat line, an injury report that firms up through the week).
+    #: * ``first_capture`` — keep the earliest capture of each key and ignore the capture date. Right
+    #:   only for a source whose natural key already carries its own observation timestamp, so a row
+    #:   is immutable once seen and re-capturing the cumulative feed records nothing new. It is what
+    #:   stops ``nflverse_depth`` multiplying by capture count once the pre-lock cron runs (#15).
+    #:
+    #: **Declared, not derived from "does the key hold a timestamp".** ``nflverse_injuries`` carried
+    #: ``date_modified`` in its key until #17 and would have been mis-classified immutable by such a
+    #: rule, yet it is genuinely revisable (Thursday's *Questionable*, Sunday's *Out*) and must keep
+    #: the default. The property is semantic — is a row immutable once observed? — not syntactic.
+    #:
+    #: ``first_capture`` **assumes** immutability: if a provider ever revised an already-published
+    #: keyed observation, the correction would be dropped with no drift signal at all, because
+    #: retaining a per-date copy is exactly what the policy removes. For ``nflverse_depth`` that trade
+    #: is accepted; weigh it before declaring ``first_capture`` on any future source.
+    dedup: Literal["per_capture_date", "first_capture"] = DEFAULT_DEDUP
     #: Earliest season the backfill can actually recover, when that is later than the lake's span.
     #: ``None`` means "as far back as anyone asks" — the normal case.
     backfillable_from: int | None = None
@@ -100,6 +120,8 @@ class Source:
             raise ValueError(
                 f"{self.name}: content_known {self.content_known!r} not in {CONTENT_KNOWN}"
             )
+        if self.dedup not in DEDUP_POLICIES:
+            raise ValueError(f"{self.name}: dedup {self.dedup!r} not in {DEDUP_POLICIES}")
         if not self.cadence:
             raise ValueError(f"{self.name}: cadence must be non-empty")
         unknown = sorted(set(self.cadence) - set(CADENCES))
@@ -141,6 +163,7 @@ def _source(
     *,
     backfillable: bool,
     content_known: str,
+    dedup: str = DEFAULT_DEDUP,
     backfillable_from: int | None = None,
 ) -> Source:
     return Source(
@@ -150,6 +173,7 @@ def _source(
         cadence=frozenset(cadence),
         backfillable=backfillable,
         content_known=content_known,  # type: ignore[arg-type]
+        dedup=dedup,  # type: ignore[arg-type]
         backfillable_from=backfillable_from,
     )
 
@@ -256,6 +280,9 @@ _REGISTRY: tuple[Source, ...] = (
     # legacy shape carries none of it and has no clean key of its own, so collect_depth_charts
     # returns an empty capture for an older season -- backfillable_from keeps the backfill from
     # walking 2016-2024 to produce nine of those.
+    # dedup=first_capture (the ONLY source that departs from the default): the feed is a cumulative
+    # append-only log and dt is in the key, so a row is immutable and twice-weekly pre-lock captures
+    # would otherwise re-write the whole season-to-date as new rows -- ~10M rows for ~548k keys (#15).
     _source(
         "nflverse_depth",
         "week",
@@ -263,6 +290,7 @@ _REGISTRY: tuple[Source, ...] = (
         ("prelock", "backfill"),
         backfillable=True,
         content_known="row_timestamp",
+        dedup="first_capture",
         backfillable_from=2025,
     ),
     # load_ff_playerids. mfl_id is ffverse's primary key (sleeper_id/gsis_id are nullable).

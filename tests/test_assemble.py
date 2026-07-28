@@ -39,7 +39,7 @@ from dataset.assemble import (
     lookahead_ok,
     observed_weather_ok,
 )
-from store.lake import LocalParquetBackend, write_snapshot
+from store.lake import LocalParquetBackend, read_snapshot, write_snapshot
 
 FIXTURES = Path(__file__).parent / "fixtures" / "nflverse"
 
@@ -496,6 +496,48 @@ def test_position_resolves_as_of_the_depth_chart_before_lock(backend):
     assert row["position"] == "RB"  # the newest snapshot strictly before the lock
     assert not row["position_is_static"]
     assert row["depth_pos_rank"] == pytest.approx(1.0)
+
+
+def test_the_dedup_policy_does_not_change_what_the_as_of_position_join_sees(tmp_path):
+    """#15 decision 2, made executable. ``nflverse_depth`` resolves its as-of position from ``dt``
+    (``content_known='row_timestamp'``) and dedups on ``(gsis_id, dt)`` — it never reads
+    ``_captured_at``. So the pre-fix shape (the cumulative feed re-captured every pre-lock run, N
+    rows per key) and the ``first_capture`` shape (one row per key) must produce the identical
+    position, because an immutable ``dt``-keyed row carries the same payload in every capture.
+    """
+    depth_feed = [
+        {"dt": "2026-09-10T07:00:00Z", "team": "KC", "gsis_id": GSIS, "pos_abb": "QB", "pos_rank": 2},
+        {"dt": "2026-09-15T07:00:00Z", "team": "KC", "gsis_id": GSIS, "pos_abb": "RB", "pos_rank": 1},
+    ]
+    depth_keys = ("dt", "team", "gsis_id", "pos_abb")
+
+    # Lake A: the registry default for depth (first_capture) -> one row per key.
+    fixed = LocalParquetBackend(root=tmp_path / "first_capture")
+    _base_lake(fixed)
+    _write(fixed, "nflverse_depth", SEASON, depth_feed, captured_at=BACKFILL_RUN,
+           key_cols=depth_keys)
+
+    # Lake B: the #15 defect, reconstructed on purpose. The same feed captured on three dates under
+    # the old per_capture_date policy (forced via the explicit override), so every key is stored 3x.
+    multiplied = LocalParquetBackend(root=tmp_path / "per_capture_date")
+    _base_lake(multiplied)
+    for day in ("2026-09-11", "2026-09-14", "2026-09-18"):
+        write_snapshot(
+            "nflverse_depth", SEASON, [{**row, "_backfill": True} for row in depth_feed],
+            captured_at=f"{day}T12:00:00+00:00", key_cols=depth_keys,
+            dedup="per_capture_date", backend=multiplied,
+        )
+
+    # The two partitions really are different shapes — otherwise the test proves nothing.
+    assert len(read_snapshot("nflverse_depth", SEASON, backend=fixed)) == 2
+    assert len(read_snapshot("nflverse_depth", SEASON, backend=multiplied)) == 6
+
+    fixed_row = _only(build_training_frame([SEASON], SCORING, backend=fixed))
+    multiplied_row = _only(build_training_frame([SEASON], SCORING, backend=multiplied))
+
+    for column in ("position", "position_is_static", "depth_pos_rank", "depth_dt"):
+        assert fixed_row[column] == multiplied_row[column], column
+    assert fixed_row["position"] == "RB"  # the newest snapshot strictly before the lock, either way
 
 
 @pytest.mark.parametrize(

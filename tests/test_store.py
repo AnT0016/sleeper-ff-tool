@@ -334,6 +334,123 @@ def test_intended_point_in_time_dedup_never_warns(backend, caplog):
     assert caplog.text == ""
 
 
+# --------------------------------------------------------------------------- first_capture policy (#15)
+# nflverse_depth is keyed on its own observation timestamp (dt), so a row is immutable and
+# re-capturing the cumulative feed on a later date records nothing new. Its declared "first_capture"
+# policy keeps one row per key however many times it is captured, where the per-capture-date default
+# would multiply the partition by the number of pre-lock runs (36/season) -- the #15 defect.
+DEPTH = "nflverse_depth"
+DEPTH_KEYS = SOURCES[DEPTH].key_cols  # ("dt", "team", "gsis_id", "pos_abb")
+WED = "2025-09-10T12:00:00+00:00"
+FRI = "2025-09-12T12:00:00+00:00"
+SUN = "2025-09-14T12:00:00+00:00"
+
+
+def _depth(dt, gsis, pos, rank):
+    return {"dt": dt, "team": "KC", "gsis_id": gsis, "pos_abb": pos, "pos_rank": rank}
+
+
+def _write_depth(backend, rows, *, captured_at, **kwargs):
+    return write_snapshot(
+        DEPTH, 2025, rows, captured_at=captured_at, key_cols=DEPTH_KEYS, backend=backend, **kwargs
+    )
+
+
+def test_first_capture_is_resolved_from_the_registry_with_no_explicit_argument(backend):
+    """The whole point of resolving inside write_snapshot: a caller that passes no ``dedup`` (the
+    runner, and every assembler-test fixture) still gets the source's declared policy."""
+    row = _depth("2025-09-08T07:00:00Z", "00-0001", "RB", 1)
+    _write_depth(backend, [row], captured_at=WED)
+    _write_depth(backend, [row], captured_at=SUN)  # later day, immutable key -> nothing new
+
+    df = read_snapshot(DEPTH, 2025, backend=backend)
+    assert len(df) == 1                          # NOT two, as the per-capture-date default would give
+    assert df.loc[0, "_captured_at"] == WED      # the earliest observation survives
+
+
+def test_first_capture_holds_the_distinct_key_count_across_many_captures(backend):
+    """#15's headline acceptance criterion: N captures of a cumulative feed on N dates must leave the
+    partition holding the distinct-key count, not N x it."""
+    feed = [
+        _depth("2025-09-07T07:00:00Z", "00-0001", "RB", 1),
+        _depth("2025-09-07T07:00:00Z", "00-0002", "WR", 1),
+        _depth("2025-09-08T07:00:00Z", "00-0001", "RB", 1),  # a later snapshot of the same player
+    ]
+    for captured_at in (WED, FRI, SUN):
+        _write_depth(backend, feed, captured_at=captured_at)
+
+    df = read_snapshot(DEPTH, 2025, backend=backend)
+    assert len(df) == 3                                  # 3 distinct keys, not 3 captures x 3 rows
+    assert set(df["_captured_at"]) == {WED}              # every survivor is the first observation
+
+
+def test_first_capture_keeps_the_earliest_row_even_when_a_later_capture_differs(backend):
+    """Teeth the row-count test lacks: earliest wins *by capture*, not by coincidence. A later
+    capture carrying revised payload for the same immutable key must not overwrite the first."""
+    key_row = _depth("2025-09-08T07:00:00Z", "00-0001", "RB", 1)
+    _write_depth(backend, [key_row], captured_at=WED)
+    _write_depth(backend, [{**key_row, "pos_rank": 9}], captured_at=SUN)  # same key, revised rank
+
+    df = read_snapshot(DEPTH, 2025, backend=backend)
+    assert len(df) == 1
+    assert df.loc[0, "pos_rank"] == 1            # the first capture, not the later revision
+    assert df.loc[0, "_captured_at"] == WED
+
+
+def test_first_capture_same_day_rerun_is_byte_idempotent(backend):
+    row = _depth("2025-09-08T07:00:00Z", "00-0001", "RB", 1)
+    path = _write_depth(backend, [row], captured_at=WED)
+    first_bytes = path.read_bytes()
+    _write_depth(backend, [row], captured_at=WED)
+    assert path.read_bytes() == first_bytes
+
+
+def test_the_per_capture_date_default_is_untouched_by_the_new_policy(backend):
+    """The default path must be behaviourally identical to before #15: a later-day capture of a
+    revisable source is still retained as a new point-in-time snapshot."""
+    _write(backend, _rows(("4046", 21.5)), captured_at=MON)
+    _write(backend, _rows(("4046", 23.9)), captured_at=TUE)
+    df = read_snapshot(SOURCE, 2026, 1, backend=backend)
+    assert len(df) == 2  # drift preserved -- same contract as test_later_date_capture_keeps_both
+
+
+def test_an_explicit_dedup_override_wins_over_the_registry(backend):
+    """An explicit policy is the documented escape hatch for tests/one-offs, and it overrides the
+    source's declaration -- here forcing depth back onto the multiplying per-capture-date path."""
+    row = _depth("2025-09-08T07:00:00Z", "00-0001", "RB", 1)
+    _write_depth(backend, [row], captured_at=WED, dedup="per_capture_date")
+    _write_depth(backend, [row], captured_at=SUN, dedup="per_capture_date")
+    assert len(read_snapshot(DEPTH, 2025, backend=backend)) == 2  # both kept, unlike first_capture
+
+
+def test_an_unknown_explicit_dedup_policy_is_rejected(backend):
+    with pytest.raises(ValueError, match="unknown dedup policy"):
+        write_snapshot(
+            SOURCE, 2026, _rows(("4046", 1.0)), captured_at=MON, week=1, key_cols=KEY,
+            dedup="keep_everything", backend=backend,
+        )
+
+
+def test_the_reconciliation_log_names_the_side_dropped_per_policy(backend, caplog):
+    """The reconciliation line flips meaning with the policy and must say which side was dropped.
+    Under ``first_capture`` the *fresh re-observation* is dropped and the stored row kept, so the
+    per-capture-date word "superseded" would read as the exact opposite of what happened -- and this
+    line exists precisely so a cron log does not hide which row was lost."""
+    depth_row = _depth("2025-09-08T07:00:00Z", "00-0001", "RB", 1)
+    _write_depth(backend, [depth_row], captured_at=WED)
+    with caplog.at_level(logging.INFO, logger="store.lake"):
+        _write_depth(backend, [depth_row], captured_at=SUN)  # later day, immutable key
+    assert "1 re-observations dropped" in caplog.text
+    assert "superseded" not in caplog.text
+
+    caplog.clear()
+    _write(backend, _rows(("4046", 21.5)), captured_at=MON)
+    with caplog.at_level(logging.INFO, logger="store.lake"):
+        _write(backend, _rows(("4046", 23.9)), captured_at=MON_LATER)  # same day supersede
+    assert "1 superseded" in caplog.text
+    assert "re-observations dropped" not in caplog.text
+
+
 # --------------------------------------------------------------------------- cheap inventory
 class _SpyBackend(LocalParquetBackend):
     """Records every materializing read so a test can prove what was actually fetched.

@@ -104,6 +104,49 @@ which *is* committed because Streamlit Cloud redeploys from it.)
   starts 2026 Week 1). Actuals, snaps, opportunity, injuries, schedules, Vegas lines and historical
   weather **are backfillable now**.
 
+### Per-source dedup policy (Decision #15)
+`Source.dedup` declares how the store collapses repeat captures of one key; `write_snapshot` resolves
+it from the registry (an explicit argument overrides, for tests/one-offs). Two policies:
+- **`per_capture_date`** (default) — keep the latest row per key **per UTC capture date**, so a
+  later-day capture is a new point-in-time snapshot. Correct for anything the provider can revise in
+  place: a corrected stat line, and an **injury** report that firms up through the week. `#17` removed
+  `date_modified` from the `nflverse_injuries` key, so an injury row is genuinely revisable and this
+  retention is now the *only* thing preserving the Thursday-Questionable / Sunday-Out revision stream
+  — it stays on the default.
+- **`first_capture`** — keep the earliest capture of each key, ignoring capture date. Correct **only**
+  for a source whose natural key already carries its own observation timestamp, so a row is immutable
+  once seen and re-capturing the cumulative feed records nothing new. **`nflverse_depth` alone**
+  (`dt` is in its key): without this, twice-weekly pre-lock captures re-write the whole season-to-date
+  feed as new rows, converging on ~10M rows for ~548k distinct keys — ~18× redundancy in one parquet
+  file, and (post-#9) that whole partition re-uploaded to S3 on every run.
+
+**Declared, not derived.** The policy is a semantic fact ("is a row immutable once observed?"), not
+one inferable from "does the key hold a timestamp": `nflverse_injuries` carried `date_modified` in its
+key until #17 and would have been mis-classified immutable by such a rule, yet it is revisable.
+
+**The cost of the immutability assumption.** `first_capture` *assumes* the key never changes payload.
+If a provider ever revised an already-published keyed observation (nflverse re-issuing a `dt` snapshot),
+the correction would be dropped with **no drift signal at all** — retaining a per-date copy is exactly
+what the policy removes. For `nflverse_depth` that trade is accepted; anyone weighing `first_capture`
+for a future source should see the cost, not only the storage benefit.
+
+**Invariance for the assembler (#7).** The policy changes *which capture survives*, never the set of
+distinct keys, and an immutable row's payload is identical across captures. `nflverse_depth`'s only
+consumer resolves its position **as-of `dt`** (`content_known="row_timestamp"`) and dedups on
+`(gsis_id, dt)` — it never reads `_captured_at` — so the as-of join sees exactly the same rows under
+either policy. Under `first_capture` the surviving `_captured_at` is the *first* time we observed the
+`dt`, which is the more honest point-in-time answer anyway.
+
+**`_backfill` under `first_capture`.** The surviving row's `_backfill` marker records whichever capture
+observed the key **first**, not "was this key ever backfilled". Harmless for `nflverse_depth` (the
+assembler resolves it via `dt` and never reads the marker), but note it: `_backfill` is load-bearing
+for every *other* source, where the default policy keeps it total and meaningful.
+
+**What this bounds, and what it does not.** `first_capture` bounds **storage** — depth stops growing
+without bound. It does **not** reduce per-run I/O: `write_snapshot` still read-modify-writes the whole
+partition, so a late-season pre-lock run still reads ~548k rows, dedups, and re-writes ~548k, twice a
+week over S3. That is inherent to the store's merge design, not something #15 addresses.
+
 ### Projection baselines: none are backfillable — and that's fine (Decision #6)
 No **ex-ante** weekly projection is freely/cleanly recoverable for past seasons (Yahoo is OAuth-gated
 with no historical projection feed; ESPN isn't archived; FantasyPros/ffanalytics are personal-use and
@@ -142,9 +185,12 @@ def write_snapshot(
 ) -> Path
     # 1. build DataFrame from rows; attach reserved cols.
     # 2. merge with any existing partition file.
-    # 3. dedup: keep the latest _captured_at per (key_cols + capture_date),
-    #    where capture_date = _captured_at[:10]. (Same-day re-run is idempotent;
-    #    a later-day capture of the same key is retained as a new point-in-time snapshot.)
+    # 3. dedup per the source's policy (resolved from the registry when `dedup=None`):
+    #    - "per_capture_date" (default): keep the latest _captured_at per (key_cols + capture_date),
+    #      where capture_date = _captured_at[:10]. Same-day re-run is idempotent; a later-day capture
+    #      of the same key is retained as a new point-in-time snapshot (drift preserved).
+    #    - "first_capture": keep the earliest _captured_at per key, ignoring capture date. For a
+    #      source keyed on its own observation timestamp, so a row is immutable (see #15).
     # 4. write atomically (temp file + os.replace).
     # Returns the path written. Empty rows -> no-op, returns the path (no file created).
 
@@ -171,6 +217,7 @@ class Source:
     key_cols: tuple[str, ...]    # natural key within the source
     cadence: frozenset[str]      # subset of {"prelock", "postgame", "backfill"}
     backfillable: bool
+    dedup: Literal["per_capture_date", "first_capture"] = "per_capture_date"  # merge policy (#15)
 
 SOURCES: dict[str, Source]       # the authoritative registry (single source of truth for collectors + crons)
 ```
