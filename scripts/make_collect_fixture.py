@@ -20,11 +20,20 @@ from typing import Any
 
 from sleeper.client import get_projections, get_season_projections, get_stats
 
-OUT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "sleeper_raw_2025_w1.json"
+FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+OUT = FIXTURES / "sleeper_raw_2025_w1.json"
 SEASON = 2025
 WEEK = 1
 #: One row per roster position, so K's distance buckets and DEF's team-keyed rows are both covered.
 POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
+
+#: The 2016 duplicate-game fixture (#21). Sleeper emits the JAX@SD game of week 2 twice — every
+#: player of both teams (incl. the JAX DST) under two game_ids, byte-identical stats — so the
+#: collector's identical-stat collapse can be tested offline on the real provider shape.
+DUPE_OUT = FIXTURES / "sleeper_stats_2016_w2_dupe.json"
+DUPE_SEASON = 2016
+DUPE_WEEK = 2
+DUPE_GAME_IDS = ("201610200", "201610229")
 
 
 def _points(row: Mapping[str, Any]) -> float:
@@ -58,7 +67,8 @@ def _sample(rows: Iterable[Mapping[str, Any]], *, with_teamless: bool) -> list[d
     return picked
 
 
-def main() -> None:
+def write_2025_fixture() -> None:
+    """The main collector fixture: real 2025 W1 shapes across the roster positions."""
     proj_week = _sample(get_projections(SEASON, WEEK), with_teamless=True)
     proj_season = _sample(get_season_projections(SEASON), with_teamless=True)
     stats_week = _sample(get_stats(SEASON, WEEK), with_teamless=False)
@@ -77,6 +87,32 @@ def main() -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"wrote {OUT} ({OUT.stat().st_size / 1024:.1f} KiB)")
+
+
+def write_stats_dupe_fixture() -> None:
+    """The 2016 duplicate-game fixture (#21): the whole JAX@SD game the feed emits twice.
+
+    Verbatim rows whose ``game_id`` is either half of the artifact pair — 34 players × 2, byte-
+    identical stats — so ``collect_stats_week``'s identical-stat collapse runs on the real shape.
+    """
+    rows = [r for r in get_stats(DUPE_SEASON, DUPE_WEEK) if str(r.get("game_id")) in DUPE_GAME_IDS]
+    payload = {
+        "_generated_by": "scripts/make_collect_fixture.py (write_stats_dupe_fixture)",
+        "_note": "verbatim Sleeper API rows for the #21 duplicate-game artifact; never hand-edit",
+        "season": DUPE_SEASON,
+        "week": DUPE_WEEK,
+        "game_id_pair": list(DUPE_GAME_IDS),
+        "rows": rows,
+    }
+    DUPE_OUT.parent.mkdir(parents=True, exist_ok=True)
+    # LF explicitly: .gitattributes stores *.json as eol=lf, so emit it that way on Windows too.
+    DUPE_OUT.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="\n")
+    print(f"wrote {DUPE_OUT} ({len(rows)} rows, {DUPE_OUT.stat().st_size / 1024:.1f} KiB)")
+
+
+def main() -> None:
+    write_2025_fixture()
+    write_stats_dupe_fixture()
 
 
 if __name__ == "__main__":

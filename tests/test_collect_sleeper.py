@@ -19,10 +19,12 @@ from pathlib import Path
 
 import pytest
 
-from collect.base import Collected
+from collect.base import Collected, dedupe_rows
 from collect.registry import SOURCES
 from collect.sleeper import (
     _INJURY_FIELDS,
+    _flatten,
+    _freshness,
     collect_proj_season,
     collect_proj_week,
     collect_stats_week,
@@ -30,6 +32,7 @@ from collect.sleeper import (
 from store.lake import RESERVED, LocalParquetBackend, read_snapshot, write_snapshot
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sleeper_raw_2025_w1.json"
+DUPE_FIXTURE = Path(__file__).parent / "fixtures" / "sleeper_stats_2016_w2_dupe.json"
 
 SEASON = 2025
 WEEK = 1
@@ -201,6 +204,91 @@ def test_collectors_never_emit_reserved_columns(captures):
     for capture in captures.values():
         for row in capture.rows:
             assert not set(row) & set(RESERVED)
+
+
+# ---------------------------------------------------- the 2016 duplicate-game artifact (#21)
+# Sleeper emits one whole game twice in 8 weeks of 2016 -- both teams (incl. the DST) under
+# game_ids 2016<1><WW>00 and ...29, byte-identical stats. dedupe_rows already collapses them, but
+# with a WARNING whose documented meaning is "real rows are being deleted". The fix collapses the
+# agreeing repeats at INFO before dedupe sees them, and keeps the WARNING for a genuine stat
+# conflict. The fixture is the real JAX@SD week-2 game (34 players x 2), generated verbatim by
+# scripts/make_collect_fixture.py.
+DUPE_PAIR = ("201610200", "201610229")
+
+
+@pytest.fixture(scope="module")
+def dupe_raw() -> dict:
+    return json.loads(DUPE_FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_collapse_is_output_identical_to_plain_dedupe(dupe_raw):
+    """THE safety claim of #21, in one assertion: the collapse changes nothing but the warning.
+
+    The new path (collapse -> flatten -> dedupe, inside ``collect_stats_week``) returns a row list
+    byte-for-byte identical to the old path (flatten -> dedupe alone). That proves both "row counts
+    unchanged" and "nothing else changed" -- keep-last is what makes it hold (dedupe keeps the last
+    listing too, so the surviving game_id never flips).
+    """
+    rows = dupe_raw["rows"]
+    key_cols = SOURCES["sleeper_stats_week"].key_cols
+    old_path = dedupe_rows(
+        (_flatten(r, source="sleeper_stats_week", key_cols=key_cols) for r in rows),
+        key_cols,
+        source="sleeper_stats_week",
+        freshness=_freshness,
+    )
+    new_path = collect_stats_week(2016, 2, fetch=_fetch(rows)).rows
+    assert new_path == old_path
+
+
+def test_duplicate_game_collapses_at_info_naming_the_pair(dupe_raw, caplog):
+    """The real 2016 week-2 shape: 34 players collapse to one row each, logged at INFO, no warning."""
+    with caplog.at_level(logging.INFO):
+        capture = collect_stats_week(2016, 2, fetch=_fetch(dupe_raw["rows"]))
+
+    ids = [r["player_id"] for r in capture.rows]
+    assert len(ids) == 34
+    assert len(ids) == len(set(ids))          # each player exactly once
+    assert "JAX" in ids                        # the DST case that makes the artifact unambiguous
+
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("collapsed 34/68" in m and f"{DUPE_PAIR}" in m for m in infos)
+    # Zero warnings is the entire point of the ticket.
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_conflicting_stats_still_warn_and_are_not_collapsed(caplog):
+    """A stat *conflict* stays loud -- this is the case the collapse must never silence.
+
+    Mutation check (per #21): making the collapse unconditional (token keyed on player_id alone,
+    dropping the stat signature) would fold these two rows together, remove the WARNING, and turn
+    this test red -- which is exactly the guardrail asked for.
+    """
+    rows = [
+        {"player_id": "JAX", "game_id": "201610200", "stats": {"pts_allow": 38.0}},
+        {"player_id": "JAX", "game_id": "201610229", "stats": {"pts_allow": 17.0}},  # conflict
+    ]
+    with caplog.at_level(logging.INFO):
+        capture = collect_stats_week(2016, 2, fetch=_fetch(rows))
+
+    assert len(capture.rows) == 1                                   # dedupe still collapses to one
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("duplicate row" in m for m in warnings)             # loud: provider self-disagrees
+    # ...and it is NOT reported as a benign identical-stats collapse.
+    assert not any(
+        "identical stats" in r.getMessage() for r in caplog.records if r.levelno == logging.INFO
+    )
+
+
+def test_collapse_keeps_the_last_listing():
+    """Keep-last mirrors dedupe_rows (base.py), so the surviving game_id is deterministic."""
+    rows = [
+        {"player_id": "JAX", "game_id": "201610200", "stats": {"pts_allow": 38.0}},
+        {"player_id": "JAX", "game_id": "201610229", "stats": {"pts_allow": 38.0}},  # identical
+    ]
+    capture = collect_stats_week(2016, 2, fetch=_fetch(rows))
+    assert len(capture.rows) == 1
+    assert capture.rows[0]["game_id"] == "201610229"   # the last of the two listings
 
 
 # --------------------------------------------------------------------------- raw pass-through

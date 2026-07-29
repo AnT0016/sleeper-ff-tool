@@ -195,6 +195,87 @@ def _freshness(row: Mapping[str, Any]) -> int:
     return int(value) if isinstance(value, (int, float)) else 0
 
 
+def _stat_signature(raw: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """A hashable, order-independent view of a row's raw ``stats`` payload.
+
+    The signature is the **stats alone** — never the meta. Two rows sharing a key *and* this
+    signature are the same observation the provider listed twice, not a stat correction, which is the
+    exact split :func:`_collapse_repeated_games` turns on.
+    """
+    stats = raw.get("stats") or {}
+    return tuple(sorted((str(k), stats[k]) for k in stats))
+
+
+def _collapse_repeated_games(
+    raw_rows: Iterable[Mapping[str, Any]],
+    key_cols: Sequence[str],
+    *,
+    source: str,
+    freshness: Callable[[Mapping[str, Any]], Any],
+) -> list[dict]:
+    """Collapse rows the provider listed more than once with a **byte-identical stat payload**.
+
+    In 2016 ``sleeper_stats_week`` emits one whole game twice — every player of both teams (incl. the
+    DST) under two game_ids ``2016<1><WW>00`` and ``...29`` (8 weeks; zero occurrences 2017+). Across
+    a pair, ``game_id`` differs on **every** row, ``week_shard`` on most, and the **stats on none**;
+    ``last_modified`` is null throughout, so this is an id-assignment artifact, not a stat correction
+    (see #21). Letting ``dedupe_rows`` collapse them with its WARNING would fire a defect warning on
+    every backfill — precisely how an operator learns to skim the one that matters.
+
+    Only repeats whose **stats agree** collapse, at INFO; a genuine stat conflict is left in place for
+    :func:`collect.base.dedupe_rows` to warn about (that is the loud case — "the provider disagrees
+    with itself about a player's stat line"). This mirrors ``collect.nflverse._identified`` /
+    ``_latest_revision``: a grain reduction with an INFO count, done before the store's dedup can
+    mistake it for a defect. And like ``_latest_revision``, it is invoked from **one** collector
+    (``collect_stats_week``), not the shared ``_collect``: the "benign" evidence is specific to this
+    backfillable source, and a first-ever duplicate on the forward-only projection feeds — whose
+    captures are unrecoverable — must stay a WARNING.
+
+    The winner per ``(key, stats)`` is the **last** listing (keep-last on a freshness tie), matching
+    ``dedupe_rows`` (``base.py`` ``rank(row) >= kept_rank``). The pair's order is mixed within a week,
+    so no tie-break yields a consistent index; matching ``dedupe_rows`` instead makes this change
+    provably output-identical to the plain dedup — the whole safety claim of #21 (game_id *is*
+    retained in the collected row, so an arbitrary flip would land in the lake). Rows whose key is not
+    usable pass through untouched, so ``dedupe_rows`` still drops and counts them.
+    """
+    kept: dict[tuple[Any, ...], dict] = {}       # (key, stat-signature) -> winning raw row
+    kept_rank: dict[tuple[Any, ...], Any] = {}
+    first_game_id: dict[tuple[Any, ...], Any] = {}
+    unusable: list[dict] = []                     # null/blank key -> dedupe_rows drops + warns it
+    collapsed = 0
+    keys_hit: set[Any] = set()
+    pairs: set[tuple[str, str]] = set()
+
+    for raw in raw_rows:
+        row = dict(raw)
+        pid = _player_id(row)
+        if pid is None:
+            unusable.append(row)
+            continue
+        token = (pid, _stat_signature(row))
+        game_id = row.get("game_id")
+        if token in kept:
+            collapsed += 1
+            keys_hit.add(pid)
+            if first_game_id[token] != game_id:
+                pairs.add(tuple(sorted((str(first_game_id[token]), str(game_id)))))
+            # keep-last on a freshness tie, exactly as dedupe_rows does (base.py).
+            if freshness(row) >= kept_rank[token]:
+                kept[token], kept_rank[token] = row, freshness(row)
+            continue
+        kept[token], kept_rank[token], first_game_id[token] = row, freshness(row), game_id
+
+    if collapsed:
+        total = len(kept) + collapsed + len(unusable)
+        _LOG.info(
+            "%s: collapsed %d/%d row(s) (%.2f%%) the provider listed twice with identical stats "
+            "under game_id pair(s) %s - an id-assignment artifact (see #21), not a stat correction; "
+            "kept the last listing per %s",
+            source, collapsed, total, collapsed / total * 100, sorted(pairs), list(key_cols),
+        )
+    return list(kept.values()) + unusable
+
+
 def _collect(
     source: str,
     season: int,
@@ -258,8 +339,16 @@ def collect_stats_week(
 
     Sleeper-keyed, so it is the cross-check for DST and K — where nflverse's player-level feed has
     no team-defense aggregate and no FG-distance buckets.
+
+    The one collector that pre-collapses identical-stat repeats (:func:`_collapse_repeated_games`):
+    the 2016 feed lists one whole game twice, and without this a backfill warns every run (#21).
     """
     get = fetch or client.get_stats
-    return _collect(
-        "sleeper_stats_week", season, get(season, week, positions=positions), week=int(week)
+    source = "sleeper_stats_week"
+    raw_rows = _collapse_repeated_games(
+        get(season, week, positions=positions),
+        SOURCES[source].key_cols,
+        source=source,
+        freshness=_freshness,
     )
+    return _collect(source, season, raw_rows, week=int(week))
