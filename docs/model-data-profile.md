@@ -11,10 +11,11 @@
 ## Findings, measured
 
 1. **No historical projection baseline (finding #1).** `baseline_sleeper_points` is non-null for **0 / 169,685** rows across 2016–2025 — Sleeper's endpoints serve only the latest values, so the market-beating grade is forward-only from 2026 W1. §6 proves it per season.
-2. **Role/depth is one season deep (finding #3).** `nflverse_depth` populates `depth_pos_rank` for **92.1%** of 2025 cohort rows and **0.0%** of every earlier season — confirmed from the data, not the registry comment.
-3. **Week 1 is a distinct cold-start cohort.** 10,127 week-1 rows carry no current-season lags (100% null `points_last`); the weekly model needs an explicit path for them. Counted apart in §3.
-4. **The frame is majority non-fantasy rows.** 60.6% of rows (102,757 of 169,685) are IDP / special-teams positions (LB, CB, DE, P, LS…) that recorded a stat line and score ~0 under this scoring. Every model must filter to the 6-position fantasy cohort (66,928 rows) — so §2–§5 of this report are scoped to it.
-5. **Zero warnings on real data.** The full build emitted **0** WARNING-level log record(s) — the standing project bar, met on its first full-scale test (§7).
+2. **Role/depth is one season deep (finding #3).** `nflverse_depth` populates `depth_pos_rank` for **92.1%** of 2025 cohort rows; the best-covered earlier season reaches **0.0%** — confirmed from the data, not the registry comment.
+3. **Week 1 is a distinct cold-start cohort.** 4,011 week-1 cohort rows carry no current-season lags (100% null `points_last`); the weekly model needs an explicit path for them. Broken out per season × position in §3.
+4. **The frame is majority non-fantasy rows.** 60.6% of rows (102,757 of 169,685) are IDP / special-teams positions (LB, CB, DE, P, LS…) that recorded a stat line and average **0.04** custom points under this scoring. Every model must filter to the 6-position fantasy cohort (66,928 rows) — so §2–§5 of this report are scoped to it.
+5. **Whole feature families are absent for specific positions.** **K** is missing 2/13 usage_lag; **DEF** is missing 9/13 usage_lag, 2/2 depth_role, 3/3 injury_nflverse column(s). The per-season null rates in §5 are pooled over the cohort and hide this — §5b breaks them out per position, which is the grain #29/#30 actually consume (spec, Decision #5).
+6. **Zero warnings on real data.** The full build emitted **0** WARNING-level log record(s) — the standing project bar, met on its first full-scale test (§7).
 
 ## 1. Rows per season × position (full frame)
 
@@ -94,7 +95,7 @@ Coverage % = the max non-null share over a group's columns (the coarse *is any o
 
 ## 5. Per-feature null rate by season (fantasy cohort)
 
-Null % per feature per season. Read alongside §3: a usage lag is null for a player's first appearance by construction, so its rate is floored by the week-1 cohort, not by missing data. `*_trend` needs two prior appearances and is null one week longer again.
+Null % per feature per season. Two floors are in play and they are different things. A usage lag is null for a player's **first appearance** by construction, so every rate here is floored by the week-1 cohort of §3 (`*_trend` needs two prior appearances and is null one week longer again). But these rates are also **pooled over positions**, so a family that is entirely absent for one position inflates every season equally — which is why `snap_pct_last` (~17%) sits above `points_last` (~10%) with no season-to-season story. **§5b is the table to read for that**; this one is for spotting a change over time.
 
 | feature | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -140,6 +141,55 @@ Null % per feature per season. Read alongside §3: a usage lag is null for a pla
 | wx_observed_wind_mph | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
 | **baseline** |  |  |  |  |  |  |  |  |  |  |
 | baseline_sleeper_points | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+
+## 5b. Per-feature null rate by position (fantasy cohort, all seasons)
+
+The same features, pooled over seasons and split by position — the grain the models actually consume, per the spec's Decision #5. A ~100% cell here is not sparse data, it is a feature that **does not exist** for that position, because `nflverse_snaps` and `nflverse_ff_opp` cover offensive skill players only. Measured: **K** is missing 2/13 usage_lag; **DEF** is missing 9/13 usage_lag, 2/2 depth_role, 3/3 injury_nflverse column(s). #30 owns K and DEF, so this is its input inventory — and note what survives: the market columns and `is_indoor` are 100% present for both, and both keep their own points lags. That is the feature set #30 has to work with.
+
+| feature | QB | RB | WR | TE | K | DEF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **usage_lag** |  |  |  |  |  |  |
+| games_played_prior | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| points_last | 12.3 | 10.2 | 9.8 | 10.8 | 7.9 | 6.1 |
+| points_ewma | 12.3 | 10.2 | 9.8 | 10.8 | 7.9 | 6.1 |
+| points_trend | 23.2 | 19.5 | 18.9 | 20.7 | 15.5 | 12.1 |
+| snap_pct_last | 12.3 | 10.5 | 9.9 | 10.9 | 7.9 | 100.0 |
+| snap_pct_ewma | 12.3 | 10.5 | 9.9 | 10.9 | 7.9 | 100.0 |
+| snap_pct_trend | 23.2 | 19.8 | 19.0 | 20.8 | 15.5 | 100.0 |
+| target_share_last | 12.3 | 10.2 | 9.8 | 10.8 | 7.9 | 100.0 |
+| target_share_ewma | 12.3 | 10.2 | 9.8 | 10.8 | 7.9 | 100.0 |
+| rush_share_last | 12.7 | 18.7 | 19.9 | 19.2 | 99.8 | 100.0 |
+| rush_share_ewma | 12.5 | 13.8 | 13.9 | 13.7 | 98.6 | 100.0 |
+| exp_points_last | 12.7 | 18.7 | 19.9 | 19.2 | 99.8 | 100.0 |
+| exp_points_ewma | 12.5 | 13.8 | 13.9 | 13.7 | 98.6 | 100.0 |
+| **depth_role** |  |  |  |  |  |  |
+| depth_pos_rank | 89.4 | 89.7 | 89.4 | 89.3 | 89.9 | 100.0 |
+| depth_dt | 89.4 | 89.7 | 89.4 | 89.3 | 89.9 | 100.0 |
+| **injury_nflverse** |  |  |  |  |  |  |
+| inj_report_status | 97.7 | 95.6 | 94.5 | 95.9 | 98.6 | 100.0 |
+| inj_practice_status | 83.3 | 84.2 | 81.3 | 84.3 | 95.8 | 100.0 |
+| inj_report_primary | 97.7 | 95.6 | 94.5 | 95.9 | 98.6 | 100.0 |
+| **injury_sleeper** |  |  |  |  |  |  |
+| inj_sleeper_status | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| inj_sleeper_body_part | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| **market** |  |  |  |  |  |  |
+| implied_team_total | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| opp_implied_total | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| team_spread_line | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| total_line | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| is_div_game | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| **weather_venue** |  |  |  |  |  |  |
+| is_indoor | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| **weather_forecast** |  |  |  |  |  |  |
+| wx_forecast_temp_f | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| wx_forecast_wind_mph | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| wx_forecast_precip_prob_pct | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| wx_forecast_lead_hours | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| **weather_observed** |  |  |  |  |  |  |
+| wx_observed_temp_f | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| wx_observed_wind_mph | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
+| **baseline** |  |  |  |  |  |  |
+| baseline_sleeper_points | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 |
 
 ## 6. `baseline_sleeper_points` — null across every season (finding #1)
 

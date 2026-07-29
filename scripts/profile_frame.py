@@ -154,6 +154,12 @@ def _count_table(
     return _md_table(headers, rows)
 
 
+def _present(by_season: Mapping[int, pd.DataFrame], cols: Sequence[str]) -> list[str]:
+    """The subset of ``cols`` the assembler actually emitted (every season shares one schema)."""
+    known = set.intersection(*(set(sub.columns) for sub in by_season.values())) if by_season else set()
+    return [c for c in cols if c in known]
+
+
 def _null_table(
     by_season: Mapping[int, pd.DataFrame], seasons: Sequence[int], groups: Mapping[str, Sequence[str]]
 ) -> str:
@@ -161,7 +167,7 @@ def _null_table(
     headers = ["feature", *[str(s) for s in seasons]]
     rows: list[list[str]] = []
     for group, cols in groups.items():
-        present = [c for c in cols if all(c in sub.columns for sub in by_season.values())]
+        present = _present(by_season, cols)
         if not present:
             continue
         rows.append([f"**{group}**", *[""] * len(seasons)])
@@ -187,15 +193,81 @@ def _availability_table(
     headers = ["feature group", "cols", *[str(s) for s in seasons], "note"]
     rows: list[list[str]] = []
     for group, cols in groups.items():
-        present = [c for c in cols if all(c in sub.columns for sub in by_season.values())]
+        present = _present(by_season, cols)
         cells = []
         for season in seasons:
             sub = by_season[season]
+            # "--" not "0.0": a column the assembler no longer emits is a schema change, and
+            # rendering it as a measured zero would read as "we looked and there was no data".
             if not present or len(sub) == 0:
-                cells.append("0.0")
+                cells.append("--")
             else:
                 cells.append(f"{max(sub[c].notna().mean() for c in present) * 100:.1f}")
         rows.append([group, str(len(present)), *cells, GROUP_NOTES.get(group, "")])
+    return _md_table(headers, rows)
+
+
+#: A column is "absent" for a position at or above this null rate. Not 100%: a handful of rows can
+#: carry a stray value (a kicker who took a carry) without the feature being usable for that position.
+_ABSENT_AT = 0.99
+
+
+def _absent_by_position(
+    cohort: pd.DataFrame, positions: Sequence[str], groups: Mapping[str, Sequence[str]]
+) -> dict[str, list[tuple[str, list[str], int]]]:
+    """``position -> [(group, columns absent for it, group size)]`` at >= :data:`_ABSENT_AT` null.
+
+    Counted **per column, not all-or-nothing per group**: the finding that matters is that DST
+    carries no snap/target/rush/expected-points column while still carrying the points lags, and a
+    group-level ``all()`` misses it entirely (``games_played_prior`` is 0% null for DST, so
+    ``usage_lag`` never qualifies as wholly absent — yet 8 of its 13 columns are gone).
+
+    Groups absent for *every* position are excluded: those are the forward-only sources (the two
+    Sleeper families, the weather forecast) already reported by §4, and repeating them per position
+    would bury the asymmetric case this exists for.
+    """
+    out: dict[str, list[tuple[str, list[str], int]]] = {}
+    for group, cols in groups.items():
+        present = [c for c in cols if c in cohort.columns]
+        if not present or all(cohort[c].isna().mean() >= _ABSENT_AT for c in present):
+            continue  # not in the frame, or absent everywhere — §4's story, not this one
+        for pos in positions:
+            sub = cohort[cohort["position"] == pos]
+            if not len(sub):
+                continue
+            gone = [c for c in present if sub[c].isna().mean() >= _ABSENT_AT]
+            if gone:
+                out.setdefault(pos, []).append((group, gone, len(present)))
+    return out
+
+
+def _absent_sentence(absent: Mapping[str, Sequence[tuple[str, list[str], int]]]) -> str:
+    """The per-position absences as one prose sentence, or a stated absence of absences."""
+    if not absent:
+        return "No feature group is absent for any one position while present for the others."
+    parts = [
+        f"**{pos}** is missing " + ", ".join(f"{len(gone)}/{size} {group}" for group, gone, size in items)
+        for pos, items in absent.items()
+    ]
+    return "; ".join(parts) + " column(s)."
+
+
+def _null_by_position_table(
+    cohort: pd.DataFrame, positions: Sequence[str], groups: Mapping[str, Sequence[str]]
+) -> str:
+    """Null rate (%) per feature per position, pooled over all seasons — §5's missing dimension."""
+    usable = [p for p in positions if len(cohort[cohort["position"] == p])]
+    headers = ["feature", *usable]
+    subs = {p: cohort[cohort["position"] == p] for p in usable}
+    rows: list[list[str]] = []
+    for group, cols in groups.items():
+        present = [c for c in cols if c in cohort.columns]
+        if not present:
+            continue
+        rows.append([f"**{group}**", *[""] * len(usable)])
+        for column in present:
+            cells = [f"{subs[p][column].isna().mean() * 100:.1f}" for p in usable]
+            rows.append([column, *cells])
     return _md_table(headers, rows)
 
 
@@ -245,10 +317,21 @@ def render_report(
 
     n_rows = len(frame)
     n_cohort = len(cohort)
-    idp_share = (n_rows - n_cohort) / n_rows * 100 if n_rows else 0.0
-    week1 = frame[frame["week"] == 1]
+    idp = frame[~frame["position"].isin(FANTASY_POSITIONS)]
+    idp_share = len(idp) / n_rows * 100 if n_rows else 0.0
+    # Measured, not asserted: "score ~0" is a claim about this scoring, and IDP players do
+    # occasionally find a scoring key (fum_rec_td is 6).
+    idp_mean_points = float(idp["y_custom_points"].mean()) if len(idp) else 0.0
+    # Cohort-scoped, matching section 3's table — the sections cross-reference each other.
+    week1 = cohort[cohort["week"] == 1]
     week1_lag_null = week1["points_last"].isna().mean() * 100 if len(week1) else 0.0
     depth_cov = {s: by_season[s]["depth_pos_rank"].notna().mean() * 100 for s in seasons}
+    # Every headline number below is derived. A literal here would let the report contradict the
+    # table it cites the moment the underlying fact changes — and both of these facts are expected
+    # to change (the baseline fills from 2026 W1; depth backfills only from 2025).
+    baseline_nn = int(frame["baseline_sleeper_points"].notna().sum())
+    prior_depth_cov = max((depth_cov[s] for s in seasons[:-1]), default=0.0)
+    absent = _absent_by_position(cohort, FANTASY_POSITIONS, FEATURE_GROUPS)
     n_warnings = sum(1 for level, *_ in records if level >= logging.WARNING)
     generated = datetime.now(timezone.utc).date().isoformat()
 
@@ -271,21 +354,25 @@ def render_report(
         "## Findings, measured",
         "",
         f"1. **No historical projection baseline (finding #1).** `baseline_sleeper_points` is "
-        f"non-null for **0 / {n_rows:,}** rows across {seasons[0]}–{seasons[-1]} — Sleeper's "
-        "endpoints serve only the latest values, so the market-beating grade is forward-only from "
-        "2026 W1. §6 proves it per season.",
+        f"non-null for **{baseline_nn:,} / {n_rows:,}** rows across {seasons[0]}–{seasons[-1]} — "
+        "Sleeper's endpoints serve only the latest values, so the market-beating grade is "
+        "forward-only from 2026 W1. §6 proves it per season.",
         f"2. **Role/depth is one season deep (finding #3).** `nflverse_depth` populates "
-        f"`depth_pos_rank` for **{depth_cov[seasons[-1]]:.1f}%** of {seasons[-1]} cohort rows and "
-        f"**0.0%** of every earlier season — confirmed from the data, not the registry comment.",
-        f"3. **Week 1 is a distinct cold-start cohort.** {len(week1):,} week-1 rows carry no "
+        f"`depth_pos_rank` for **{depth_cov[seasons[-1]]:.1f}%** of {seasons[-1]} cohort rows; the "
+        f"best-covered earlier season reaches **{prior_depth_cov:.1f}%** — confirmed from the data, "
+        "not the registry comment.",
+        f"3. **Week 1 is a distinct cold-start cohort.** {len(week1):,} week-1 cohort rows carry no "
         f"current-season lags ({week1_lag_null:.0f}% null `points_last`); the weekly model needs an "
-        "explicit path for them. Counted apart in §3.",
+        "explicit path for them. Broken out per season × position in §3.",
         f"4. **The frame is majority non-fantasy rows.** {idp_share:.1f}% of rows "
         f"({n_rows - n_cohort:,} of {n_rows:,}) are IDP / special-teams positions (LB, CB, DE, P, "
-        "LS…) that recorded a stat line and score ~0 under this scoring. Every model must filter to "
-        f"the {len(FANTASY_POSITIONS)}-position fantasy cohort ({n_cohort:,} rows) — so §2–§5 of "
-        "this report are scoped to it.",
-        f"5. **Zero warnings on real data.** The full build emitted **{n_warnings}** WARNING-level "
+        f"LS…) that recorded a stat line and average **{idp_mean_points:.2f}** custom points under "
+        f"this scoring. Every model must filter to the {len(FANTASY_POSITIONS)}-position fantasy "
+        f"cohort ({n_cohort:,} rows) — so §2–§5 of this report are scoped to it.",
+        f"5. **Whole feature families are absent for specific positions.** {_absent_sentence(absent)} "
+        "The per-season null rates in §5 are pooled over the cohort and hide this — §5b breaks them "
+        "out per position, which is the grain #29/#30 actually consume (spec, Decision #5).",
+        f"6. **Zero warnings on real data.** The full build emitted **{n_warnings}** WARNING-level "
         "log record(s) — the standing project bar, met on its first full-scale test (§7).",
         "",
         "## 1. Rows per season × position (full frame)",
@@ -323,11 +410,27 @@ def render_report(
         "",
         "## 5. Per-feature null rate by season (fantasy cohort)",
         "",
-        "Null % per feature per season. Read alongside §3: a usage lag is null for a player's first "
-        "appearance by construction, so its rate is floored by the week-1 cohort, not by missing "
-        "data. `*_trend` needs two prior appearances and is null one week longer again.",
+        "Null % per feature per season. Two floors are in play and they are different things. A "
+        "usage lag is null for a player's **first appearance** by construction, so every rate here "
+        "is floored by the week-1 cohort of §3 (`*_trend` needs two prior appearances and is null "
+        "one week longer again). But these rates are also **pooled over positions**, so a family "
+        "that is entirely absent for one position inflates every season equally — which is why "
+        "`snap_pct_last` (~17%) sits above `points_last` (~10%) with no season-to-season story. "
+        "**§5b is the table to read for that**; this one is for spotting a change over time.",
         "",
         _null_table(by_season, seasons, FEATURE_GROUPS),
+        "",
+        "## 5b. Per-feature null rate by position (fantasy cohort, all seasons)",
+        "",
+        "The same features, pooled over seasons and split by position — the grain the models "
+        "actually consume, per the spec's Decision #5. A ~100% cell here is not sparse data, it is "
+        "a feature that **does not exist** for that position, because `nflverse_snaps` and "
+        "`nflverse_ff_opp` cover offensive skill players only. Measured: "
+        f"{_absent_sentence(absent)} #30 owns K and DEF, so this is its input inventory — and note "
+        "what survives: the market columns and `is_indoor` are 100% present for both, and both keep "
+        "their own points lags. That is the feature set #30 has to work with.",
+        "",
+        _null_by_position_table(cohort, FANTASY_POSITIONS, FEATURE_GROUPS),
         "",
         "## 6. `baseline_sleeper_points` — null across every season (finding #1)",
         "",
