@@ -200,10 +200,24 @@ otherwise re-derive:
 
 1. **GitHub disables a scheduled workflow after 60 days of no repository *activity*** — pushes and
    commits, *not* workflow runs. This repo goes quiet roughly February–August, so the capture crons
-   would auto-disable **exactly when the season starts**. Off-season re-enable step: before Week 1,
-   push any commit to `main` (or open the Actions tab and re-enable each disabled workflow), then
-   confirm both `collect-prelock` and `collect-postgame` show as enabled. Do this as part of the
-   annual 2026-league swap so the first pre-lock capture is not silently skipped.
+   would auto-disable **exactly when the season starts**. Prevention and recovery are two different
+   actions and one does not substitute for the other:
+
+   - **Prevent.** Any push to `main` inside the 60-day window resets the clock. GitHub emails a
+     warning before it disables anything.
+   - **Recover — required once a workflow is already disabled; a push will *not* re-enable it.**
+
+     ```bash
+     gh workflow enable "Collect — pre-lock snapshot"
+     gh workflow enable "Collect — post-game snapshot"
+     gh workflow list --all     # confirm both read "active"
+     ```
+
+     `--all` matters: a disabled workflow drops out of the default listing, which is exactly how you
+     would fail to notice.
+
+   Do this as part of the annual league swap, before Week 1, so the first pre-lock capture — the one
+   nothing can recover — is not silently skipped.
 2. **Under `dedup=first_capture`, `nflverse_depth`'s `lake_inventory().latest_captured_at` means "the
    first observation of the newest key", not "when the partition was last written".** `first_capture`
    keeps the *earliest* `_captured_at` per key, so the max over the partition is the first-seen time of
@@ -216,11 +230,15 @@ otherwise re-derive:
    deliberately adds no grep-for-"Skipping" to the crons, precisely so this correct no-op is never
    misread as red. **Do not alert on it.**
 4. **`sleeper_stats_week`'s 2016 duplicate-game artifact is collapsed at collect time** (Ticket #21):
-   the source occasionally lists one player-week twice, and the collector merges such duplicates
-   **all-or-nothing per key** *only when the listings agree*. **A key whose listings disagree is left
-   untouched on purpose**, so the collector's `dedupe_rows` (`collect.base`) still emits its warning
-   rather than silently picking a winner. Don't "finish the job" by force-collapsing disagreeing keys
-   — the surviving warning is the signal.
+   the feed emits **one whole game twice** — every player of both teams including the DST, under two
+   `game_id`s (`2016<1><WW>00` and `...29`) with byte-identical stats — in **8 weeks of 2016 only**
+   (2, 4, 6, 9, 10, 13, 15, 17), with **zero occurrences 2017+**. It is an id-assignment artifact, not
+   a stat correction: `last_modified` is null on every row and the stats never disagree. The collector
+   merges such duplicates **all-or-nothing per key** *only when the listings agree*. **A key whose
+   listings disagree is left untouched on purpose**, so `dedupe_rows` (`collect.base`) still emits its
+   warning rather than silently picking a winner. Don't "finish the job" by force-collapsing
+   disagreeing keys — the surviving warning is the signal. And a lone duplicated player-week is **not**
+   this artifact; treat it as new.
 5. **`_backfill=False` means "written by a cadence run", NOT "observed contemporaneously".**
    `run_cadence` (both prelock and postgame via `scripts/collect.py`) always stamps `False`; only
    `run_backfill` stamps `True`. So a **postgame recovery re-run with an explicit past `--week`** — the
