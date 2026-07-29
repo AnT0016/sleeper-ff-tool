@@ -13,6 +13,8 @@ Build strictly in order — do not skip ahead.
 | 4 | Waiver / stash / handcuff intelligence | Reverse-standings **priority** logic (not FAAB); handcuff free-agent detector; playoff-SOS stash ranker |
 | 5 | Hosted season dashboard + weekly refresh | Streamlit Community Cloud + GitHub Actions cron (Tue evening CEST, UTC best-effort) that commits updated data |
 | 6 | (Optional) Monte Carlo draft simulator | Forward simulation; build last |
+| 7 | (Optional) Full-season championship Monte Carlo | Given the twelve rosters as they stand, how often does my team win the title? Reuses the Phase 1/2 board; directional, read-only |
+| 8 | Cloud data collection + point-in-time lake (feature store) | Lookahead-free player×week training frame assembled on demand (`build_training_frame`); collected by cloud crons to S3/B2. **Models are the next phase.** See [data-conventions.md](data-conventions.md) |
 
 ## Foundations already decided (CLAUDE.md → Architecture)
 - Python data layer → custom-scored projections → parquet/SQLite committed to the repo.

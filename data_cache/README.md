@@ -17,5 +17,19 @@ data committed by the weekly GitHub Actions refresh (Phase 5).
   the real draft. Kept apart from `season.db` on purpose so the weekly refresh never overwrites it.
   Rebuild whenever you want to re-run it (safe mid-season — only finished weeks are included).
 
-Not committed (gitignored, regenerated on demand): `http_cache.sqlite` (the `requests-cache` HTTP
-store, written by `src/sleeper/http.py`) and `nflverse_cache/` (nflreadpy's raw download cache).
+## The Phase 8 lake (`data_cache/lake/`) — not committed
+
+The point-in-time historical dataset ("the lake") is the one structural exception to "data_cache is
+committed". Its **production store is cloud object storage** (Backblaze B2 today), so `data_cache/lake/`
+is **only the local dev/backfill materialization** — written when `LAKE_BACKEND=local` (the default) —
+and it is gitignored. The cron workflows write to the B2 bucket with `LAKE_BACKEND=s3`, and that bucket
+is the source of truth for captured point-in-time data. Partition layout is identical on both backends
+(`<source>/season=<YYYY>/<file>.parquet`), so a bucket populated from a local backfill is byte-for-byte
+the same shape.
+
+- **Setup + credentials + backend behaviour:** [docs/b2-setup.md](../docs/b2-setup.md).
+- **The point-in-time conventions the lake enforces:** [docs/data-conventions.md](../docs/data-conventions.md).
+
+Not committed (gitignored, regenerated on demand): `data_cache/lake/` (the local lake materialization,
+above), `http_cache.sqlite` (the `requests-cache` HTTP store, written by `src/sleeper/http.py`) and
+`nflverse_cache/` (nflreadpy's raw download cache).
