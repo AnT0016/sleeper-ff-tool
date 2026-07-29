@@ -15,6 +15,7 @@ Build strictly in order — do not skip ahead.
 | 6 | (Optional) Monte Carlo draft simulator | Forward simulation; build last |
 | 7 | (Optional) Full-season championship Monte Carlo | Given the twelve rosters as they stand, how often does my team win the title? Reuses the Phase 1/2 board; directional, read-only |
 | 8 | Cloud data collection + point-in-time lake (feature store) | Lookahead-free player×week training frame assembled on demand (`build_training_frame`); collected by cloud crons to S3/B2. **Models are the next phase.** See [data-conventions.md](data-conventions.md) |
+| 9 | In-house models over the lake | **Evaluation before models** — no historical Sleeper baseline exists (forward-only from 2026 W1), so the bar is defined first. Models predict *stats*; the Phase 1 engine scores them. Selectable, **not default**, until the declared swap bar is cleared. See [plans/modeling.md](plans/modeling.md) |
 
 ## Foundations already decided (CLAUDE.md → Architecture)
 - Python data layer → custom-scored projections → parquet/SQLite committed to the repo.
