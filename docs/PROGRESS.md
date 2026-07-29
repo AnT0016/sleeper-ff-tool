@@ -498,3 +498,64 @@ concrete, gradeable offers.
       `season.db` untouched). **Limitation (stated):** 1-for-1 only (no 2-for-1 consolidation yet), and
       values roster quality by season projection — it doesn't model positional scarcity beyond the
       lineup or a partner's willingness.
+
+## Phase 8 — Cloud data collection + point-in-time lake `[~]` IN PROGRESS (ticket 8 of 9)
+Stands up a **point-in-time, lookahead-free** historical dataset ("the lake"), collected automatically
+by cloud crons, so we can start building our **own** models. Every downstream tool today re-scores
+Sleeper's projections; there is no in-house model and no training data, and the single most valuable
+label — *what was projected before lock vs. what actually happened* — is discarded every week we don't
+capture it (Sleeper's endpoints serve only the latest values). **This phase ships the data foundation
+only; the models are the next phase** (`build_training_frame` is the hand-off). Full design:
+[docs/plans/data-collection.md](plans/data-collection.md); conventions: [docs/data-conventions.md](data-conventions.md).
+
+Tickets — **1–7 and 9 shipped; #8 = this docs ticket, in flight:**
+- [x] **#1 store + registry** — [src/store/lake.py](../src/store/lake.py) (`StorageBackend` protocol +
+      `LocalParquetBackend`, `LAKE_BACKEND` selection, per-partition merge/dedup, atomic write) and
+      [src/collect/registry.py](../src/collect/registry.py) (the authoritative `SOURCES` table, pinned
+      by [tests/test_registry.py](../tests/test_registry.py)).
+- [x] **#2 Sleeper collectors** — [src/collect/sleeper.py](../src/collect/sleeper.py) (`proj_week`,
+      `proj_season`, `stats_week`; raw stat dicts, scoring-agnostic — no re-scoring at collect time).
+- [x] **#3 nflverse collectors** — [src/collect/nflverse.py](../src/collect/nflverse.py) (`player_week`,
+      `snaps`, `ff_opportunity`, `injuries`, `schedules`, `depth_charts`, `id_crosswalk`), wrapping the
+      existing loaders and keeping provider-native stat names.
+- [x] **#4 market + weather collectors** — [src/collect/market.py](../src/collect/market.py) (implied
+      team totals from schedules) and [src/collect/weather.py](../src/collect/weather.py) (open-meteo
+      forecast + dome flag; best-effort, never fatal).
+- [x] **#5 runners** — [src/collect/runner.py](../src/collect/runner.py) behind
+      [scripts/collect.py](../scripts/collect.py) (prelock/postgame, off-season-safe, best-effort per
+      source, one capture in memory at a time) and [scripts/backfill_lake.py](../scripts/backfill_lake.py)
+      (one-time 2016–2025 pull with the `_backfill` marker).
+- [x] **#9 S3 backend** — [src/store/s3.py](../src/store/s3.py) (`S3Backend`, S3-compatible via `boto3`;
+      Backblaze B2 today), env-driven `LAKE_S3_*` creds, cheap footer/range-request metadata reads.
+      Owner checklist + behaviour in [docs/b2-setup.md](b2-setup.md).
+- [x] **#6 cloud crons** — [.github/workflows/collect-prelock.yml](../.github/workflows/collect-prelock.yml)
+      (Thu ~22:00 + Sun ~15:00 UTC) and [collect-postgame.yml](../.github/workflows/collect-postgame.yml)
+      (Tue ~12:00 UTC), `LAKE_BACKEND=s3` with a guard, off-season skip, **one shared concurrency
+      group across both files**, timeouts, no git-commit. Contract pinned by
+      [tests/test_workflows.py](../tests/test_workflows.py).
+- [x] **#7 dataset assembler** — [src/dataset/assemble.py](../src/dataset/assemble.py)
+      (`build_training_frame` + `lookahead_ok`): the lookahead gate (content + capture rules, fails
+      closed), label + baseline re-scored via the Phase 1 engine, one row per `(player_id, season, week)`,
+      every unjoined row logged.
+- [~] **#8 docs + conventions (this ticket)** — [docs/data-conventions.md](data-conventions.md), the
+      auto-loading [data-conventions skill](../.claude/skills/data-conventions/SKILL.md), and updates to
+      CLAUDE.md (Phase 8 block + status), PLAN.md, this log, [data_cache/README.md](../data_cache/README.md),
+      [README.md](../README.md). (`.gitignore` already ignores `data_cache/lake/`.)
+
+**Key hardening decisions (documented where they live):** per-source dedup policy (#15 — `nflverse_depth`
+alone is `first_capture`); postgame week resolved from the season **schedule**, not `state.week`
+(#16 — an unresolvable week is a **green skip, exit 0**); `sleeper_stats_week`'s 2016 duplicate-game
+artifact collapsed at collect time, all-or-nothing per key (#21). Five facts that previously lived only
+in PR/issue threads — the 60-day cron-disable, `latest_captured_at`'s meaning under `first_capture`, the
+green-skip, the collapse, and `_backfill=False`'s semantics — are now written down in
+[docs/data-conventions.md §9](data-conventions.md).
+
+**Cron verification (2026-07-29):** both workflows dispatch green from `main`; the four `LAKE_S3_*`
+secrets resolve and the `LAKE_BACKEND=s3` guard passes; **postgame's write path to B2 is proven end to
+end (6/6 sources, 59,998 rows to `s3://`)**; **prelock's write path is NOT yet proven** — it has only
+ever taken the off-season skip and cannot be tested out of season (a past-week prelock run would file
+today's projections into that week's partition). First real proof is the Thursday before Week 1.
+Recorded in [docs/data-conventions.md §10](data-conventions.md).
+
+Full suite **604 passed**; `ruff` clean. **Next:** land #8, re-enable the crons before Week 1 (they
+disable after 60 days of repo quiet — see §9 fact 1), then the modeling phase.

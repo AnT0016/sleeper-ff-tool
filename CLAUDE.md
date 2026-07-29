@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Project: Sleeper Fantasy Football Tool.** Persistent project context. Read at the start of every session. Keep edits high-signal; this is a behavioral contract, not documentation.
 
 ## Repo status & commands
-Scaffolded; Python 3.11+, `src/` layout. **Phase 1 (data + scoring foundation) is DONE and validated** — see [docs/PROGRESS.md](docs/PROGRESS.md). One-time setup: `python -m venv .venv` then `./.venv/Scripts/python -m pip install -e ".[dev]"`.
+Python 3.11+, `src/` layout. **Phases 1–7 are DONE and validated**; **Phase 8** (cloud data collection → point-in-time lake → on-demand training frame) is in flight — see [docs/PROGRESS.md](docs/PROGRESS.md) for per-phase status. One-time setup: `python -m venv .venv` then `./.venv/Scripts/python -m pip install -e ".[dev]"`.
 
 - Run tests (offline): `./.venv/Scripts/python -m pytest -q`
 - Custom-scoring season validation (network, cached): `./.venv/Scripts/python scripts/validate_custom.py`
@@ -67,6 +67,14 @@ Engine = `sum(stat_value * scoring_settings.get(key, 0))` over all stat keys. FG
 - **Projections v1:** use Sleeper's own projections endpoint (zero ID-mapping friction). Add `ffanalytics` (R) / FantasyPros later. FantasyPros & ffanalytics data are personal-use only — code can be public, but don't redistribute their data.
 - **ID join:** skill players on `gsis_id`; DST by team abbreviation. **Log every projection row that fails to join.**
 
+## Data conventions (Phase 8 lake)
+Phase 8 stands up a **point-in-time, lookahead-free** historical dataset ("the lake"), collected by cloud crons, and assembles a player×week **training frame** on demand — the hand-off to the (next-phase) models. Full reference: **[docs/data-conventions.md](docs/data-conventions.md)**; the same rules auto-load as a skill ([.claude/skills/data-conventions/SKILL.md](.claude/skills/data-conventions/SKILL.md)). Non-negotiables when touching any collection / feature / model code:
+- **UTC everywhere**; a week-N feature may use only data knowable **before week-N's first kickoff** — the gate ([`dataset.assemble.lookahead_ok`](src/dataset/assemble.py)) **fails closed**.
+- **Labels re-scored live** from `scoring_settings` (the Phase 1 engine), never hand-coded.
+- **Join keys:** `gsis_id` (skill/K) · team abbreviation (DST) · `sleeper_id`; log every row that fails to join.
+- **`sleeper_proj_*` are forward-only** (start 2026 W1; the endpoints serve only the latest values); everything else is backfillable. `content_known` ≠ `cadence`.
+- **[`src/collect/registry.py`](src/collect/registry.py) is the authoritative source table** (pinned by `tests/test_registry.py`); the crons' contract is held by [`tests/test_workflows.py`](tests/test_workflows.py). Add a source with one registry entry + a collector — never a change to the store.
+
 ## Build order (do NOT skip ahead)
 1. Sleeper client + scoring engine. **Validate first:** re-score last season's nflverse actuals and confirm totals match Sleeper's reported points for ~20 players across all positions (incl. K & DEF) before building anything else.
 2. Local live draft tracker — best-available by custom VOR, tiers, positional runs, roster needs; snake-pick simulation once the slot is revealed.
@@ -80,6 +88,7 @@ Engine = `sum(stat_value * scoring_settings.get(key, 0))` over all stat keys. FG
 - The API is the source of truth for scoring & roster settings; this file is a reference.
 - Don't draft K or DEF early — the edge is weekly streaming via custom scoring, not draft position.
 - No secrets in the repo (Sleeper needs none; if a FantasyPros key is added, use Streamlit/Actions secrets).
+- The Phase 8 lake is **read-only collection** (GET only — the read-only rule extends to it): it never writes to Sleeper. Its production store is cloud object storage (Backblaze B2); the only credentials — the B2 S3 keys — live in **GitHub Actions secrets, never the repo** (see [docs/b2-setup.md](docs/b2-setup.md)).
 
 ## League ids (registry: [src/sleeper/config.py](src/sleeper/config.py))
 - `LEAGUE_ID` (ACTIVE): `1378062197778833408` — 2026 **"Test league"** sandbox, settings copied from the 2025 league (scoring/roster/waivers/playoffs identical, verified against the API). **Swap to the real 2026 league id once the league is recreated** — one line in config.py, or per-run via `SLEEPER_LEAGUE_ID`; discover it with `client.get_user_leagues(MY_USER_ID, 2026)`. The weekly refresh fail-safes on a league-vs-NFL season mismatch, so a stale id skips instead of publishing a wrong snapshot.
