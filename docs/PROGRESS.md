@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **1 of 8 shipped:**
+Tickets — **2 of 8 shipped:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
@@ -537,9 +537,22 @@ Tickets — **1 of 8 shipped:**
       missing 2/13** — while the pooled rates read ~17%/~32%. What survives for both is the market
       columns and `is_indoor` (100% present) plus their own points lags, which is exactly the input
       set #30's spec leans on. Report section 5b carries the per-position grain.
-- [ ] **#28 evaluation harness + baselines** — walk-forward season splits, per-position metrics
-      (MAE/RMSE, Spearman rho **within (position, week)**, calibration), the `Predictor` protocol, and
-      three naive baselines whose scores become the recorded bar. Leak test written red first.
+- [x] **#28 evaluation harness + baselines** — [src/model/evaluate.py](../src/model/evaluate.py) +
+      [baselines.py](../src/model/baselines.py) + [scripts/eval_baselines.py](../scripts/eval_baselines.py)
+      → [docs/model-baselines.md](model-baselines.md) (the recorded bar; regenerate, never hand-edit).
+      Walk-forward season splits (train <= S-1, test S over 2018-2025), the `Predictor` protocol, and
+      per-position MAE/RMSE + **Spearman within a real `(season, week)` slate** + calibration by decile.
+      **The leak test is written red first:** a `Split` reaching into its own test season raises
+      `LeakError` and fails closed, the #28 analogue of Phase 8's lookahead gate; there is deliberately
+      no random/k-fold splitter to select. Two non-obvious calls, both documented: the Spearman grain is
+      `(season, week)` not a bare week number (which would fold different seasons' week-5 boards into one
+      correlation), and the three baselines share a learned **per-position-mean fallback** for cold-start
+      rows so they are graded on one identical row universe. Recorded bar (lowest held-out MAE):
+      **QB/RB/WR/TE -> TrailingMean 6.81 / 4.72 / 4.42 / 3.42**; **K/DEF -> LaggedExpectedPoints 3.68 /
+      4.95**. The surprise the per-position grain exists to catch: for **K the flat fallback wins MAE yet
+      carries ~zero ordering (rho ~0.03-0.07)**, and `exp_points` is skill-only so `LaggedExpectedPoints`
+      admits **no rho slate for DEF (—)**. Every #29-#33 improvement claim is now checkable against a
+      fixed number.
 - [ ] **#29 weekly model (QB/RB/WR/TE)** — must beat all three baselines on **both** MAE and within-week
       rank correlation; week-1 cold start scored separately.
 - [ ] **#30 weekly K + DST** — predicts **stat components** scored through the Phase 1 engine, never a
