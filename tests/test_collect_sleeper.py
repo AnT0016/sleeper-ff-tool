@@ -23,6 +23,7 @@ from collect.base import Collected, dedupe_rows
 from collect.registry import SOURCES
 from collect.sleeper import (
     _INJURY_FIELDS,
+    _collapse_repeated_games,
     _flatten,
     _freshness,
     collect_proj_season,
@@ -281,7 +282,13 @@ def test_conflicting_stats_still_warn_and_are_not_collapsed(caplog):
 
 
 def test_collapse_keeps_the_last_listing():
-    """Keep-last mirrors dedupe_rows (base.py), so the surviving game_id is deterministic."""
+    """Keep-last mirrors dedupe_rows (base.py), so the survivor is a function of the feed order.
+
+    Deterministic, *not* a consistent index: the pair's order is mixed within a single week (2016
+    week 2 lists ``...29`` first for 10 players and ``...00`` first for the other 24), so keep-last
+    yields both ids across a real capture. That is fine precisely because it is what plain dedup
+    already does -- matching it is what keeps this change output-identical.
+    """
     rows = [
         {"player_id": "JAX", "game_id": "201610200", "stats": {"pts_allow": 38.0}},
         {"player_id": "JAX", "game_id": "201610229", "stats": {"pts_allow": 38.0}},  # identical
@@ -289,6 +296,52 @@ def test_collapse_keeps_the_last_listing():
     capture = collect_stats_week(2016, 2, fetch=_fetch(rows))
     assert len(capture.rows) == 1
     assert capture.rows[0]["game_id"] == "201610229"   # the last of the two listings
+    # ...and the same rows in the other order keep the other id -- the feed decides, not the collapse.
+    flipped = collect_stats_week(2016, 2, fetch=_fetch(list(reversed(rows)))).rows
+    assert flipped[0]["game_id"] == "201610200"
+
+
+def test_a_key_with_any_disagreement_is_left_entirely_alone(caplog):
+    """Output-identity has to be structural, not a property of what 2016 happens to contain.
+
+    ``dedupe_rows``' tie-break is positional (``last_modified`` is null on every 2016 row, so every
+    freshness rank is 0), so collapsing *per listing* changes the winner as soon as one key is listed
+    three times with mixed payloads: ``X, Y, X`` would leave ``[X_last, Y]`` and dedup would then keep
+    ``Y``, where the plain path keeps ``X``. Collapsing all-or-nothing **per key** makes that
+    unreachable. Nothing in the feed does this today; the shape that would is a genuine stat
+    correction arriving alongside the artifact -- exactly what the conflict branch exists for, and
+    the case where keeping the earlier row means keeping pre-correction stats.
+    """
+    rows = [
+        {"player_id": "JAX", "game_id": "A", "stats": {"pts_allow": 38.0}},
+        {"player_id": "JAX", "game_id": "B", "stats": {"pts_allow": 17.0}},  # a real correction
+        {"player_id": "JAX", "game_id": "C", "stats": {"pts_allow": 38.0}},
+    ]
+    key_cols = SOURCES["sleeper_stats_week"].key_cols
+    plain = dedupe_rows(
+        (_flatten(r, source="sleeper_stats_week", key_cols=key_cols) for r in rows),
+        key_cols,
+        source="sleeper_stats_week",
+        freshness=_freshness,
+    )
+    with caplog.at_level(logging.INFO):
+        assert collect_stats_week(2016, 2, fetch=_fetch(rows)).rows == plain
+    assert plain[0]["game_id"] == "C"  # the provider's last word, either way
+    # Nothing was collapsed, so the disagreement stays loud rather than half-quiet.
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert not any("identical stats" in r.getMessage() for r in caplog.records)
+
+
+def test_the_collapse_refuses_a_registry_key_it_was_not_written_for():
+    """It keys on ``player_id`` via ``_player_id``, not on ``key_cols`` generically.
+
+    #21 decided ``sleeper_stats_week`` keeps the key ``("player_id",)``. If that ever widens, this
+    must fail rather than keep collapsing on a key the source no longer has.
+    """
+    with pytest.raises(ValueError, match="refusing to collapse"):
+        _collapse_repeated_games(
+            [], ("player_id", "game_id"), source="sleeper_stats_week", freshness=_freshness
+        )
 
 
 # --------------------------------------------------------------------------- raw pass-through
