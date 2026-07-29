@@ -499,7 +499,7 @@ concrete, gradeable offers.
       values roster quality by season projection — it doesn't model positional scarcity beyond the
       lineup or a partner's willingness.
 
-## Phase 8 — Cloud data collection + point-in-time lake `[~]` IN PROGRESS (ticket 8 of 9)
+## Phase 8 — Cloud data collection + point-in-time lake `[x]` DONE
 Stands up a **point-in-time, lookahead-free** historical dataset ("the lake"), collected automatically
 by cloud crons, so we can start building our **own** models. Every downstream tool today re-scores
 Sleeper's projections; there is no in-house model and no training data, and the single most valuable
@@ -508,7 +508,7 @@ capture it (Sleeper's endpoints serve only the latest values). **This phase ship
 only; the models are the next phase** (`build_training_frame` is the hand-off). Full design:
 [docs/plans/data-collection.md](plans/data-collection.md); conventions: [docs/data-conventions.md](data-conventions.md).
 
-Tickets — **1–7 and 9 shipped; #8 = this docs ticket, in flight:**
+Tickets — **all 9 shipped:**
 - [x] **#1 store + registry** — [src/store/lake.py](../src/store/lake.py) (`StorageBackend` protocol +
       `LocalParquetBackend`, `LAKE_BACKEND` selection, per-partition merge/dedup, atomic write) and
       [src/collect/registry.py](../src/collect/registry.py) (the authoritative `SOURCES` table, pinned
@@ -537,7 +537,7 @@ Tickets — **1–7 and 9 shipped; #8 = this docs ticket, in flight:**
       (`build_training_frame` + `lookahead_ok`): the lookahead gate (content + capture rules, fails
       closed), label + baseline re-scored via the Phase 1 engine, one row per `(player_id, season, week)`,
       every unjoined row logged.
-- [~] **#8 docs + conventions (this ticket)** — [docs/data-conventions.md](data-conventions.md), the
+- [x] **#8 docs + conventions** — [docs/data-conventions.md](data-conventions.md), the
       auto-loading [data-conventions skill](../.claude/skills/data-conventions/SKILL.md), and updates to
       CLAUDE.md (Phase 8 block + status), PLAN.md, this log, [data_cache/README.md](../data_cache/README.md),
       [README.md](../README.md). (`.gitignore` already ignores `data_cache/lake/`.)
@@ -557,5 +557,8 @@ ever taken the off-season skip and cannot be tested out of season (a past-week p
 today's projections into that week's partition). First real proof is the Thursday before Week 1.
 Recorded in [docs/data-conventions.md §10](data-conventions.md).
 
-Full suite **604 passed**; `ruff` clean. **Next:** land #8, re-enable the crons before Week 1 (they
-disable after 60 days of repo quiet — see §9 fact 1), then the modeling phase.
+Full suite **604 passed**; `ruff` clean. **Next:** the modeling phase — build in-house models over
+`build_training_frame` (the hand-off), starting from the three targets named in
+[docs/plans/data-collection.md](plans/data-collection.md). Operational reminder: re-enable the capture
+crons before Week 1 (they disable after 60 days of repo quiet — see [data-conventions.md](data-conventions.md) §9 fact 1),
+and confirm prelock's first live write the Thursday before Week 1 (§10).

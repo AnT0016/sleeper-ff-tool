@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Project: Sleeper Fantasy Football Tool.** Persistent project context. Read at the start of every session. Keep edits high-signal; this is a behavioral contract, not documentation.
 
 ## Repo status & commands
-Python 3.11+, `src/` layout. **Phases 1–7 are DONE and validated**; **Phase 8** (cloud data collection → point-in-time lake → on-demand training frame) is in flight — see [docs/PROGRESS.md](docs/PROGRESS.md) for per-phase status. One-time setup: `python -m venv .venv` then `./.venv/Scripts/python -m pip install -e ".[dev]"`.
+Python 3.11+, `src/` layout. **Phases 1–8 are DONE** — Phase 8 shipped the point-in-time data foundation (the lake + `build_training_frame`; its prelock cron gets its first live proof the Thursday before Week 1). **Next: the modeling phase** — in-house models over `build_training_frame`. See [docs/PROGRESS.md](docs/PROGRESS.md) for per-phase status. One-time setup: `python -m venv .venv` then `./.venv/Scripts/python -m pip install -e ".[dev]"`.
 
 - Run tests (offline): `./.venv/Scripts/python -m pytest -q`
 - Custom-scoring season validation (network, cached): `./.venv/Scripts/python scripts/validate_custom.py`
