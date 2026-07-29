@@ -522,10 +522,21 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **0 of 8 shipped:**
-- [ ] **#27 profile the frame** — `build_training_frame(2016..2025)` at full scale for the first time;
-      per-season x per-position counts, per-feature null rates, and the warning output recorded verbatim
-      (zero unexpected warnings on real data is the standing bar). Blocks everything else.
+Tickets — **1 of 8 shipped:**
+- [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
+      [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
+      full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
+      **zero warnings** — the standing bar met on its first real test. Measured, not assumed:
+      `baseline_sleeper_points` **0/169,685** non-null (finding #1); depth **0% before 2025, 92.1% at
+      2025** (finding #3); **4,011** week-1 cold-start cohort rows; **60.6%** of the frame is IDP /
+      special-teams player-weeks averaging **0.04** custom points, so every model must filter to the
+      6-position cohort (**66,928** rows). **Recommendation adopted: train 2016+, score 2018-2025** —
+      no null cliff justifies the 2019+ alternative.
+      **The finding that changes #29/#30:** pooled null rates hide families that do not exist for a
+      position at all — **DEF is missing 9/13 usage_lag columns and all of injury_nflverse; K is
+      missing 2/13** — while the pooled rates read ~17%/~32%. What survives for both is the market
+      columns and `is_indoor` (100% present) plus their own points lags, which is exactly the input
+      set #30's spec leans on. Report section 5b carries the per-position grain.
 - [ ] **#28 evaluation harness + baselines** — walk-forward season splits, per-position metrics
       (MAE/RMSE, Spearman rho **within (position, week)**, calibration), the `Predictor` protocol, and
       three naive baselines whose scores become the recorded bar. Leak test written red first.
