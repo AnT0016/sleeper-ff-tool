@@ -218,9 +218,9 @@ otherwise re-derive:
 4. **`sleeper_stats_week`'s 2016 duplicate-game artifact is collapsed at collect time** (Ticket #21):
    the source occasionally lists one player-week twice, and the collector merges such duplicates
    **all-or-nothing per key** *only when the listings agree*. **A key whose listings disagree is left
-   untouched on purpose**, so the store's `dedupe_rows` still emits its warning rather than the
-   collector silently picking a winner. Don't "finish the job" by force-collapsing disagreeing keys —
-   the surviving warning is the signal.
+   untouched on purpose**, so the collector's `dedupe_rows` (`collect.base`) still emits its warning
+   rather than silently picking a winner. Don't "finish the job" by force-collapsing disagreeing keys
+   — the surviving warning is the signal.
 5. **`_backfill=False` means "written by a cadence run", NOT "observed contemporaneously".**
    `run_cadence` (both prelock and postgame via `scripts/collect.py`) always stamps `False`; only
    `run_backfill` stamps `True`. So a **postgame recovery re-run with an explicit past `--week`** — the
