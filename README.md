@@ -30,6 +30,8 @@ pytest
 | `src/optimizer/` | Weekly lineup optimizer (PuLP) |
 | `src/waivers/` | Waiver / stash / handcuff intelligence |
 | `src/analysis/` | Team & league analysis views |
+| `src/draftsim/` | Monte Carlo draft simulator (Phase 6; forward, read-only) |
+| `src/seasonsim/` | Full-season championship Monte Carlo (Phase 7; P(title) from the current rosters) |
 | `src/collect/` | Phase 8 point-in-time collectors + the authoritative source registry (the lake's ingest) |
 | `src/store/` | Lake storage backends (local parquet / S3-compatible) behind one `StorageBackend` protocol |
 | `src/dataset/` | Lookahead-free training-frame assembler (`build_training_frame`) |
