@@ -499,6 +499,58 @@ concrete, gradeable offers.
       values roster quality by season projection — it doesn't model positional scarcity beyond the
       lineup or a partner's willingness.
 
+## Phase 9 — In-house models over the lake `[ ]` IN PROGRESS
+Replaces Sleeper's projections as this tool's source of player value with **our own models**, trained on
+the Phase 8 lake and graded honestly. The edge being chased is not "a better generic projection" — it is
+the three places a generic projection is *structurally* wrong for this league: **half-PPR with 4-point
+passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full design:
+[docs/plans/modeling.md](plans/modeling.md).
+
+**Three findings from profiling the lake, each of which invalidated an obvious approach:**
+1. **No historical projection baseline exists at all.** `baseline_sleeper_points` is null for every row
+   of 2016-2025 — Sleeper's endpoints serve only the latest value, so the pre-lock capture that fills it
+   produces its first rows in 2026 W1. "Beat the market" is a **forward-only, accumulating** grade. The
+   historical bar therefore has to be one we define, before any model is fit (#28).
+2. **The draft model cannot be an aggregation of the weekly model.** `sleeper_proj_season` is
+   `backfillable=False` (starts 2026) so there is no season-grain training data at all; and the weekly
+   model's features — current-season lags, the game's Vegas line, its weather — **do not exist in
+   August**. A season model is trainable, but from prior-season aggregates: a separate frame builder (#31).
+3. **Role/depth history is one season deep.** `nflverse_depth` is `backfillable_from=2025` (nflverse
+   rewrote the feed; the legacy shape has no clean key), so the breakout classifier must use snap- and
+   target/rush-share trajectories as its role proxy, with depth rank a 2025+ refinement (#33).
+
+Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
+needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
+
+Tickets — **0 of 8 shipped:**
+- [ ] **#27 profile the frame** — `build_training_frame(2016..2025)` at full scale for the first time;
+      per-season x per-position counts, per-feature null rates, and the warning output recorded verbatim
+      (zero unexpected warnings on real data is the standing bar). Blocks everything else.
+- [ ] **#28 evaluation harness + baselines** — walk-forward season splits, per-position metrics
+      (MAE/RMSE, Spearman rho **within (position, week)**, calibration), the `Predictor` protocol, and
+      three naive baselines whose scores become the recorded bar. Leak test written red first.
+- [ ] **#29 weekly model (QB/RB/WR/TE)** — must beat all three baselines on **both** MAE and within-week
+      rank correlation; week-1 cold start scored separately.
+- [ ] **#30 weekly K + DST** — predicts **stat components** scored through the Phase 1 engine, never a
+      points-valued head; a **distribution** over the points-allowed bucket, because the buckets are
+      discontinuous and a mean-then-bucket estimate is provably biased.
+- [ ] **#31 `build_season_frame` + draft-value model** — the draft-path deliverable; evaluated on
+      VOR-relevant **ordering within position**, not season-total MAE; rookies handled explicitly.
+- [ ] **#32 fit the sims' distributions** — earns the `POSITION_CV` / `GAME_CV` / `INJURY_RISK` knobs in
+      [draftsim/distributions.py](../src/draftsim/distributions.py) that are currently labelled
+      "heuristic, *not* fitted"; fitted values as a data artifact, heuristics kept as fallback.
+- [ ] **#33 breakout / waiver classifier** — the one model whose *label* is deliberately in the future
+      while its *features* stay strictly pre-lock; that asymmetry is pinned by a test.
+- [ ] **#34 projection-source seam + swap gate** — one seam, defaulting to Sleeper, with every existing
+      test passing untouched; the live model-vs-Sleeper scoreboard from 2026 W1.
+
+**Deadline routing.** Only the draft path (#27 -> #28 -> #31) has a hard date, roughly five weeks out.
+Nothing here is on the critical path to a *working* season: every surface it touches already runs on
+Sleeper's numbers, which is exactly why the swap bar (Decision #3 — beat Sleeper on both MAE and
+within-week rank correlation, per position, over >= 4 live 2026 weeks) can afford to be strict. It was
+declared before any model existed, because a bar written after seeing results is not a bar.
+
+
 ## Phase 8 — Cloud data collection + point-in-time lake `[x]` DONE
 Stands up a **point-in-time, lookahead-free** historical dataset ("the lake"), collected automatically
 by cloud crons, so we can start building our **own** models. Every downstream tool today re-scores
