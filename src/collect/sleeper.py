@@ -195,6 +195,118 @@ def _freshness(row: Mapping[str, Any]) -> int:
     return int(value) if isinstance(value, (int, float)) else 0
 
 
+def _stat_signature(raw: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """A hashable, order-independent view of a row's raw ``stats`` payload.
+
+    The signature is the **stats alone** — never the meta. Two rows sharing a key *and* this
+    signature are the same observation the provider listed twice, not a stat correction, which is the
+    exact split :func:`_collapse_repeated_games` turns on.
+    """
+    stats = raw.get("stats") or {}
+    return tuple(sorted((str(k), stats[k]) for k in stats))
+
+
+#: The registry key this collapse is written against. It keys on ``player_id`` through
+#: :func:`_player_id` rather than reading ``key_cols`` generically — raw Sleeper rows are not the
+#: flattened shape ``dedupe_rows`` keys on — so a registry change has to fail loudly here instead of
+#: silently collapsing on a key the source no longer has. #21 decided the key stays
+#: ``("player_id",)``; this is what holds the decision to it.
+_COLLAPSE_KEY: tuple[str, ...] = ("player_id",)
+
+
+def _collapse_repeated_games(
+    raw_rows: Iterable[Mapping[str, Any]],
+    key_cols: Sequence[str],
+    *,
+    source: str,
+    freshness: Callable[[Mapping[str, Any]], Any],
+) -> list[dict]:
+    """Collapse rows the provider listed more than once with a **byte-identical stat payload**.
+
+    In 2016 ``sleeper_stats_week`` emits one whole game twice — every player of both teams (incl. the
+    DST) under two game_ids ``2016<1><WW>00`` and ``...29`` (8 weeks; zero occurrences 2017+). Across
+    a pair, ``game_id`` differs on **every** row, ``week_shard`` on most, and the **stats on none**;
+    ``last_modified`` is null throughout, so this is an id-assignment artifact, not a stat correction
+    (see #21). Letting ``dedupe_rows`` collapse them with its WARNING would fire a defect warning on
+    every backfill — precisely how an operator learns to skim the one that matters.
+
+    Only repeats whose **stats agree** collapse, at INFO; a genuine stat conflict is left in place for
+    :func:`collect.base.dedupe_rows` to warn about (that is the loud case — "the provider disagrees
+    with itself about a player's stat line"). This mirrors ``collect.nflverse._identified`` /
+    ``_latest_revision``: a grain reduction with an INFO count, done before the store's dedup can
+    mistake it for a defect. And like ``_latest_revision``, it is invoked from **one** collector
+    (``collect_stats_week``), not the shared ``_collect``: the "benign" evidence is specific to this
+    backfillable source, and a first-ever duplicate on the forward-only projection feeds — whose
+    captures are unrecoverable — must stay a WARNING.
+
+    The winner per ``(key, stats)`` is the **last** listing (keep-last on a freshness tie), matching
+    ``dedupe_rows`` (``base.py`` ``rank(row) >= kept_rank``). The pair's order is mixed within a week
+    — in 2016 week 2, 10 players list ``...29`` first and 24 list ``...00`` first — so no tie-break
+    yields a *consistent* game_id, only a deterministic one; matching ``dedupe_rows`` is what makes
+    the change output-identical to the plain dedup, which is the whole safety claim of #21 (game_id
+    *is* retained in the collected row, so an arbitrary flip would land in the lake).
+
+    That identity is **structural, not a property of what 2016 happens to contain**, and it is the
+    grouping rule that wins it: a key collapses only when **every** listing of it agrees, and a key
+    with any disagreement passes through *entirely untouched*. Per-listing collapse is not safe —
+    ``dedupe_rows``' tie-break is positional (``last_modified`` is null on every 2016 row, so every
+    freshness rank is 0), so removing rows from under it changes the winner as soon as one key is
+    listed three times with mixed payloads. ``X, Y, X`` would collapse to ``[X_last, Y]`` and dedup
+    would then keep ``Y``, where the plain path keeps ``X``. Nothing in the feed does that today; the
+    shape that would is a genuine stat correction arriving alongside the artifact — precisely what
+    the conflict branch is for, and the case where keeping the earlier row means keeping
+    pre-correction stats. All-or-nothing per key makes that unreachable and makes "a conflict stays
+    loud" total rather than partial.
+
+    Order is preserved the same way: the survivor carries the **last** listing's content but sits at
+    the key's **first** index, so ``dedupe_rows``' first-seen key ordering is unchanged too. Rows
+    whose key is not usable pass through untouched, so it still drops and counts them.
+    """
+    if tuple(key_cols) != _COLLAPSE_KEY:
+        raise ValueError(
+            f"{source}: this collapse keys on {list(_COLLAPSE_KEY)} (via _player_id) but the "
+            f"registry now says {list(key_cols)}; #21 decided the key stays ('player_id',) - "
+            "refusing to collapse on a key the source no longer has"
+        )
+
+    rows = [dict(raw) for raw in raw_rows]
+    listings: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        pid = _player_id(row)
+        if pid is not None:  # a null/blank key is left in place for dedupe_rows to drop and warn
+            listings.setdefault(pid, []).append(index)
+
+    collapsed = 0
+    pairs: set[tuple[str, str]] = set()
+    replace: dict[int, dict] = {}  # key's first index -> the row that survives for it
+    drop: set[int] = set()
+
+    for indices in listings.values():
+        if len(indices) == 1:
+            continue
+        if len({_stat_signature(rows[i]) for i in indices}) > 1:
+            continue  # the provider disagrees with itself: hands off, dedupe_rows warns about it
+        # Keep-last on a freshness tie, exactly as dedupe_rows does (base.py) -- but seated at the
+        # key's first index, so its place in dedupe's first-seen key order does not move either.
+        winner = max(indices, key=lambda i: (freshness(rows[i]), i))
+        replace[indices[0]] = rows[winner]
+        drop.update(i for i in indices if i != indices[0])
+        collapsed += len(indices) - 1
+        seen = {str(rows[i].get("game_id")) for i in indices}
+        if len(seen) > 1:
+            pairs.add(tuple(sorted(seen)))
+
+    if collapsed:
+        _LOG.info(
+            "%s: collapsed %d/%d row(s) (%.2f%%) the provider listed twice with identical stats "
+            "under game_id pair(s) %s - an id-assignment artifact (see #21), not a stat correction; "
+            "kept the last listing per %s",
+            source, collapsed, len(rows), collapsed / len(rows) * 100, sorted(pairs),
+            list(key_cols),
+        )
+    return [replace.get(i, row) for i, row in enumerate(rows) if i not in drop]
+
+
 def _collect(
     source: str,
     season: int,
@@ -258,8 +370,16 @@ def collect_stats_week(
 
     Sleeper-keyed, so it is the cross-check for DST and K — where nflverse's player-level feed has
     no team-defense aggregate and no FG-distance buckets.
+
+    The one collector that pre-collapses identical-stat repeats (:func:`_collapse_repeated_games`):
+    the 2016 feed lists one whole game twice, and without this a backfill warns every run (#21).
     """
     get = fetch or client.get_stats
-    return _collect(
-        "sleeper_stats_week", season, get(season, week, positions=positions), week=int(week)
+    source = "sleeper_stats_week"
+    raw_rows = _collapse_repeated_games(
+        get(season, week, positions=positions),
+        SOURCES[source].key_cols,
+        source=source,
+        freshness=_freshness,
     )
+    return _collect(source, season, raw_rows, week=int(week))
