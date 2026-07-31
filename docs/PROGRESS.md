@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **2 of 8 shipped:**
+Tickets — **3 of 8 shipped:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
@@ -564,8 +564,32 @@ Tickets — **2 of 8 shipped:**
 - [ ] **#30 weekly K + DST** — predicts **stat components** scored through the Phase 1 engine, never a
       points-valued head; a **distribution** over the points-allowed bucket, because the buckets are
       discontinuous and a mean-then-bucket estimate is provably biased.
-- [ ] **#31 `build_season_frame` + draft-value model** — the draft-path deliverable; evaluated on
-      VOR-relevant **ordering within position**, not season-total MAE; rookies handled explicitly.
+- [x] **#31 `build_season_frame` + draft-value model** — [src/model/frame.py](../src/model/frame.py)
+      (`build_season_frame`) + [src/model/season.py](../src/model/season.py) +
+      [scripts/eval_season.py](../scripts/eval_season.py) →
+      [docs/model-draft-baseline.md](model-draft-baseline.md) (the recorded bar; regenerate, never
+      hand-edit) + tests. The season frame is a **pure aggregation of the weekly frame**
+      (`build_training_frame`), so both models consume the one audited lookahead-safe dataset and any
+      future gate fix propagates to both; the season label is the sum of the engine-scored weekly
+      `y_custom_points`, so no scoring coefficient is re-touched. Features are seasons **<= S-1 only** —
+      last season's points/games/snap-target-rush-share/expected points, career-to-date counts, a
+      team-change flag. Fail-closed per acceptance #1: the season-S team is **withheld** (no historical
+      roster source proves it pre-season), so `changed_team_prior` compares S-1 vs S-2, never the move
+      *into* S — a test pins that a player who switched teams into S gets no signal from it. The model is
+      a per-position **ridge** (closed-form numpy, no new dependency, reproducible), graded on
+      **within-`(season, position)` Spearman rho** — draft value is ranking, not level. Measured
+      walk-forward 2018-2025 on the real lake (16,949 season rows), it beats the `PriorSeasonTotal` bar on
+      rho at every position that carries a usage signal — QB 0.615 vs 0.587, RB 0.595 vs 0.561, WR 0.641
+      vs 0.583, TE 0.617 vs 0.533, **K 0.370 vs 0.354** (kickers get snap/target share, so K is modelled
+      too) — and **defers DEF** to the bar (tie at 0.296), the one position with no usage column at all:
+      an ungated ridge orders DEF at 0.265, *worse* than last-year's-total, so fielding it there would
+      rank a position with the weaker orderer (that is #30's job). Two review fixes are pinned by
+      revert-checked tests: the earliest built season is a warm-up whose `is_rookie` is 100% arithmetic,
+      so it is excluded from the fit; and `_safe_stats` silences numpy's all-null-column RuntimeWarnings
+      via `catch_warnings` (the artifact regenerates with **zero** warnings). Rookies are an explicit,
+      every-year cohort (17-25% of fantasy rows per season): null prior features, an `is_rookie` flag,
+      predicted at the position's learned level. Output feeds `draft.vor` in the exact `PlayerRow` shape
+      `build_board` produces, so tiers/VOR are reused; no consumer is wired to it (that is #34).
 - [ ] **#32 fit the sims' distributions** — earns the `POSITION_CV` / `GAME_CV` / `INJURY_RISK` knobs in
       [draftsim/distributions.py](../src/draftsim/distributions.py) that are currently labelled
       "heuristic, *not* fitted"; fitted values as a data artifact, heuristics kept as fallback.
