@@ -590,9 +590,36 @@ Tickets — **4 of 8 shipped:**
       #32 a real per-position weekly error model; the prior-season-ppg feature that would close the
       cold-start gap is logged as a Decision #8 follow-up (in-model derivable, its cost the warm-up trap,
       not Phase-8 scope).
-- [ ] **#30 weekly K + DST** — predicts **stat components** scored through the Phase 1 engine, never a
-      points-valued head; a **distribution** over the points-allowed bucket, because the buckets are
-      discontinuous and a mean-then-bucket estimate is provably biased.
+- [x] **#30 weekly K + DST** — [src/model/kickdef.py](../src/model/kickdef.py) +
+      [scripts/eval_kickdef.py](../scripts/eval_kickdef.py) → [docs/model-kickdef.md](model-kickdef.md)
+      (the measured grade) + [src/model/fit/kickdef.json](../src/model/fit/kickdef.json) (the committed,
+      regenerable artifact) + tests. Predicts **stat components** priced through the Phase 1 engine,
+      **never a points head** (Decision #2 / #7's explicit carve-out — the buckets are step functions, so
+      `E[f(X)] != f(E[X])`). The key **asymmetry**: a kicker's makes are additive across distance bands,
+      so predicting *per-band expected makes* and summing through the engine is exact with **no
+      distribution** (`coef` is constant within a band); a defence allows **one** points total bucketed by
+      a step function, so it needs a genuine **distribution** over points-allowed — emitted as
+      per-bucket probability mass and priced by the same linear engine (`engine({bucket: P}) =
+      E[pts_allow points]`, no special case in the scorer). Measured walk-forward 2018-2025 on the real
+      lake (10,499 K+DST rows, **zero warnings**): the model **beats all three baselines on both MAE and
+      within-slate ρ at both positions and all four (position × cold/warm) cells** — K 3.61/0.175, DEF
+      4.74/0.280 vs the bar's (lowest in the phase) 3.68/0.067, 4.95/0.095. The DST distribution is an
+      **empirical residual grid conditioned on μ** (predicted from `opp_implied_total`): points allowed is
+      heteroskedastic and clamp-at-0 otherwise **invents shutout probability** for elite defences on the
+      10-point `pts_allow_0` cell, so the grid is 3-bin (§E calibration: the single grid predicts
+      P(shutout) 0.0555 vs a realized 0.0423 in the lowest-μ decile; μ-conditioning closes it to 0.0472).
+      **Correctness anchor** `engine(observed components) == y_custom_points` at a **declared 99.5% floor**
+      (the eval fails below it) — 100% both positions, and it earned its keep: it caught that Sleeper
+      **nulls the raw `pts_allow` on a shutout** (setting only the bucket flag), which a naive read loses
+      as a 10-point label error *and* would train the distribution on zero shutouts — reconstructed from
+      the flags. **Gate measured per cell, not per position** (Decision #9 item 6 — four cells behind the
+      "beats K and DEF" claim), a thin cell (< 200 held-out) or a tie defers to `PriorSeasonRank`; here
+      nothing defers (both cold cells win: K:cold n=340 3.75/0.135, DEF:cold n=256 4.84/0.201). **Safe by
+      default**: `KickDefModel()` reads the recorded gate from the artifact (a missing artifact defers
+      *every* cell, never fields an unproven model), the pure-component diagnostic is the explicit
+      `defer=()`, and `load_fitted` reads heads + gate back. **No new dependency** (per-component ridge
+      over #31's solver). Artifact regenerates **byte-identical**. **Hands to #34** a selectable K/DST
+      source whose predictions re-price for free if scoring changes.
 - [x] **#31 `build_season_frame` + draft-value model** — [src/model/frame.py](../src/model/frame.py)
       (`build_season_frame`) + [src/model/season.py](../src/model/season.py) +
       [scripts/eval_season.py](../scripts/eval_season.py) →
