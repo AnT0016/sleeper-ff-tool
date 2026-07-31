@@ -338,15 +338,17 @@ is the only honest "beat the market" grade (finding #1).
   #27–#29 reviews; #30–#34 inherit it rather than restate it.
   1. **Measured or not met** — no acceptance number that is not derived from a committed, regenerable
      artifact (`scripts/eval_*.py` → `docs/*.md`, pure `render_report`, warnings captured and counted).
-     Synthetic tests pin **mechanics only**, never a bar-clearing number on a fixture engineered to
-     satisfy it (#31's defect).
+     The report's prose is **generated from its own tables**, never written alongside them: a headline
+     its own table contradicts is the defect this item exists to prevent (#27 shipped four of them, #28
+     two). Synthetic tests pin **mechanics only**, never a bar-clearing number on a fixture engineered
+     to satisfy it (#31's defect).
   2. **Revert-check every guard** — a test whose guarded code can be reverted with the test still green
      pins nothing.
   3. **Safe by default; the diagnostic is the explicit opt-out** — the shipped configuration is what the
      bare constructor yields; the weaker/diagnostic variant takes an explicit argument
-     (`SeasonModel(require_usage=True)`; `WeeklyModel()` defers by default, vs the pure-ridge
-     `WeeklyModel(defer_cold_start=())`). The #29 review caught the default being the variant the artifact
-     records as *losing*.
+     (`SeasonModel()` gates on usage vs the ungated `SeasonModel(require_usage=False)`; `WeeklyModel()`
+     defers cold start vs the pure-ridge `WeeklyModel(defer_cold_start=())`). The #29 review caught the
+     default being the variant the artifact records as *losing*.
   4. **No write-only artifact** — whatever a fitted artifact records (a gate, weights), something must
      read it back into a correctly-configured model (`load_fitted`), failing loud rather than degrading
      silently when a part is unfit.
