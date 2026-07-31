@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **4 of 8 shipped:**
+Tickets — **5 of 8 shipped:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and

@@ -876,7 +876,6 @@
     }
   },
   "defer": [],
-  "deferral": [],
   "features": [
     "implied_team_total",
     "opp_implied_total",

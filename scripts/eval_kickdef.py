@@ -416,6 +416,30 @@ def _cell_margins(component_cells, baseline_cells) -> dict[str, dict]:
     return out
 
 
+def anchor_failures(anchor: dict[str, dict]) -> dict[str, str]:
+    """Positions whose correctness anchor fails the run, mapped to the message explaining why.
+
+    Two ways to fail, and the second is the one a bare ``match_pct`` check misses: a position with **no
+    rows** scores a vacuous 100%, so "the frame came back empty" would read as a clean anchor and the run
+    would sail past its own guard. Zero rows therefore fails as loudly as a bad match rate. Pure, so the
+    gate itself is testable rather than only reachable through a full lake run.
+    """
+    out: dict[str, str] = {}
+    for pos, a in anchor.items():
+        if a["n"] == 0:
+            out[pos] = (
+                f"ANCHOR FAILURE {pos}: the frame carries no {pos} rows at all, so the anchor has "
+                "nothing to check — the component extraction or the position filter is broken."
+            )
+        elif a["match_pct"] < ANCHOR_FLOOR_PCT:
+            out[pos] = (
+                f"ANCHOR FAILURE {pos}: engine(components) reproduced only {a['match_pct']:.2f}% of "
+                f"the label (floor {ANCHOR_FLOOR_PCT}%). Mismatch keys: {a['mismatch_keys']}. A "
+                "scoring key is going unextracted — the component decomposition is incomplete."
+            )
+    return out
+
+
 def _write_artifact(
     frame, scoring, gate, margins, anchor, cal_binned, n_pa_bins, path: str
 ) -> None:
@@ -427,8 +451,9 @@ def _write_artifact(
     time, so it is not frozen here.
     """
     model = KickDefModel(scoring, n_pa_bins=n_pa_bins, defer=gate).fit(frame)
+    # `to_dict()` already records the gate under "defer" — the single key both `from_dict` and
+    # `recorded_gate` read. One name, so a future writer cannot set half of it.
     payload = model.to_dict()
-    payload["deferral"] = list(gate)
     payload["cell_margins"] = margins
     payload["anchor"] = {
         p: {k: anchor[p][k] for k in ("n", "matched", "match_pct")} for p in _POSITIONS
@@ -478,15 +503,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         # The correctness anchor gates the run: a decomposition that cannot reproduce the label is wrong.
         anchor = anchor_mismatch(frame, scoring)
-        below = {p: a for p, a in anchor.items() if a["match_pct"] < ANCHOR_FLOOR_PCT}
-        if below:
-            for pos, a in below.items():
-                print(
-                    f"ANCHOR FAILURE {pos}: engine(components) reproduced only {a['match_pct']:.2f}% of "
-                    f"the label (floor {ANCHOR_FLOOR_PCT}%). Mismatch keys: {a['mismatch_keys']}. A "
-                    "scoring key is going unextracted — the component decomposition is incomplete.",
-                    file=sys.stderr,
-                )
+        failures = anchor_failures(anchor)
+        if failures:
+            for message in failures.values():
+                print(message, file=sys.stderr)
             return 1
 
         results: dict[str, EvalResult] = {

@@ -313,6 +313,26 @@ def test_anchor_flags_an_incomplete_decomposition():
     assert anchor["DEF"]["mismatch_keys"]  # names the scoring keys on the missed rows
 
 
+def test_anchor_gate_fails_an_empty_position_instead_of_reading_a_vacuous_100_percent():
+    """Zero rows must fail the run's anchor gate — the one case a bare ``match_pct`` check waves through.
+
+    ``anchor_mismatch`` reports 100% for a position with no rows (there is nothing to mismatch), so a gate
+    written as ``match_pct < floor`` alone would treat an empty frame as a clean anchor. Dropping the
+    ``n == 0`` clause from ``anchor_failures`` turns this red.
+    """
+    empty = anchor_mismatch(_frame().iloc[0:0], _SCORING)
+    assert empty["K"]["match_pct"] == pytest.approx(100.0)  # vacuous, and above the floor
+    assert empty["K"]["n"] == 0
+    failures = ek.anchor_failures(empty)
+    assert set(failures) == {"K", "DEF"}
+    assert "no K rows at all" in failures["K"]
+    # a healthy anchor still passes, and a genuinely bad match rate still fails on the floor
+    assert ek.anchor_failures(anchor_mismatch(_frame(), _SCORING)) == {}
+    bad = {"K": {"n": 500, "match_pct": 91.0, "mismatch_keys": {"comp_fgm_50p": 44}},
+           "DEF": {"n": 500, "match_pct": 100.0, "mismatch_keys": {}}}
+    assert set(ek.anchor_failures(bad)) == {"K"} and "91.00%" in ek.anchor_failures(bad)["K"]
+
+
 def test_reconstruct_pts_allow_fills_shutouts_from_the_bucket_flag():
     """Sleeper leaves raw `pts_allow` null on a shutout; the flag says 0 — reconstruct it or lose 10 pts.
 
@@ -445,8 +465,25 @@ def test_bare_constructor_reads_the_recorded_gate():
 
 
 def test_recorded_gate_matches_the_committed_artifact():
-    recorded = tuple(json.loads(DEFAULT_ARTIFACT_PATH.read_text(encoding="utf-8"))["deferral"])
+    recorded = tuple(json.loads(DEFAULT_ARTIFACT_PATH.read_text(encoding="utf-8"))["defer"])
     assert recorded_gate() == recorded
+
+
+def test_the_gate_lives_under_exactly_one_artifact_key(tmp_path):
+    """``defer`` is the only name for the gate: what the **eval** writes is what both readers read.
+
+    The artifact once carried the gate twice — ``defer`` from ``to_dict`` and ``deferral`` bolted on by
+    ``_write_artifact`` — which a future writer could set half of, leaving ``recorded_gate`` and
+    ``from_dict`` disagreeing about what ships. This goes through the production writer, so re-adding a
+    second ``defer*`` key there turns it red.
+    """
+    gate = ("K:cold", "DEF:warm")
+    path = tmp_path / "kickdef.json"
+    ek._write_artifact(_frame(), _SCORING, gate, {}, _anchor(), pd.DataFrame(), 3, str(path))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert [k for k in payload if k.startswith("defer")] == ["defer"]  # one name, not two
+    assert recorded_gate(path) == gate                                  # the safe-default reader
+    assert KickDefModel.from_dict(payload).defer == gate                # the deserialiser
 
 
 def test_recorded_gate_falls_back_to_all_cells_when_the_artifact_is_absent():
@@ -484,7 +521,7 @@ def test_from_dict_rejects_a_drifted_feature_list():
 def test_load_fitted_reads_the_gate_and_heads_but_leaves_the_baseline_to_fit():
     """load_fitted is the artifact→model path: recorded gate + reconstructed heads, baseline left to fit."""
     model = KickDefModel.load_fitted()
-    recorded = tuple(json.loads(DEFAULT_ARTIFACT_PATH.read_text(encoding="utf-8"))["deferral"])
+    recorded = tuple(json.loads(DEFAULT_ARTIFACT_PATH.read_text(encoding="utf-8"))["defer"])
     assert model.defer == recorded
     assert model._kicker is not None and model._defense is not None  # heads reconstructed
     frame = _frame(seasons=[2016, 2017])
