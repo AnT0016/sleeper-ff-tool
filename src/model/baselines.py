@@ -147,10 +147,13 @@ class LaggedExpectedPoints(_FallbackBaseline):
     The frame already carries it lagged as ``exp_points_last`` (``dataset.assemble._lagged_usage``).
     Expected points is post-game content, so it is legal only lagged (Phase 8 Decision #6), which this
     column already is. It captures the volume a player earned last week regardless of whether it paid
-    off in points — a distinct signal from either points baseline. It exists for offensive skill
-    players only (``QB/RB/WR/TE``): ``K`` and ``DEF`` carry no expected-points column, so for them
-    this baseline is the learned position mean throughout — which is exactly why the recorded bar is
-    kept per position rather than pooled.
+    off in points — a distinct signal from either points baseline. It is an offensive-skill signal:
+    ``nflverse_ff_opp`` covers ``QB/RB/WR/TE``, so ``DEF`` has the column empty outright and ``K`` is
+    **99.8% empty** — not 100% (profile #27 §5b; 10 of 5,253 kicker rows carry a value, which is an
+    ID-crosswalk residue, not a kicker signal). For both positions this baseline is therefore the
+    learned position mean on essentially every row, and the handful of K exceptions are why
+    ``spearman_ordered_slates`` exists: they are enough to make a rho *printable* while carrying no
+    ordering anyone could use. Exactly why the recorded bar is kept per position rather than pooled.
     """
 
     _COLUMN = "exp_points_last"

@@ -130,6 +130,19 @@ def test_a_test_partition_that_mixes_seasons_is_rejected():
         Split(test_season=2017, train=frame[frame["season"] < 2016], test=frame)
 
 
+def test_a_season_the_gate_cannot_parse_is_rejected_rather_than_waved_through():
+    """Fail-closed means closed on unreadable input too, not just on a readable violation.
+
+    ``pd.to_numeric(errors="coerce")`` turns a junk season into ``NaN``, and ``NaN >= 2018`` is
+    ``False`` — so the row slid past the leak check while a *missing* column raised. A gate that
+    passes what it cannot read is the one failure mode that leaves no trace in the output.
+    """
+    junk = _frame(seasons=[2016]).astype({"season": object})
+    junk.loc[junk.index[0], "season"] = "not-a-season"
+    with pytest.raises(LeakError, match="does not parse"):
+        assert_walk_forward(junk, test_season=2018)
+
+
 # =============================================================== splits are by season only
 def test_walk_forward_train_is_strictly_before_the_test_season():
     frame = _frame(seasons=range(2016, 2021))
@@ -235,7 +248,13 @@ def test_within_slate_ordering_is_not_diluted_by_the_cross_week_level():
     assert m.spearman_slates == 2
 
 
-def test_a_constant_prediction_slate_contributes_no_spearman():
+def test_a_constant_prediction_slate_is_scored_zero_not_excused():
+    """A flat prediction offered no ordering — that is a score of 0, not an absence of one.
+
+    Excusing it was the original behaviour and it made the ρ column incomparable: on the real lake
+    ``LaggedExpectedPoints`` was flat on 134 of 141 kicker boards, so its printed ρ was the mean over
+    the 7 it happened to speak on, sitting in the same column as a baseline's mean over all 141.
+    """
     preds = pd.DataFrame(
         {
             "position": ["K"] * 4,
@@ -246,8 +265,51 @@ def test_a_constant_prediction_slate_contributes_no_spearman():
         }
     )
     m = per_position_metrics(preds)["K"]
+    assert m.spearman == pytest.approx(0.0)
+    assert m.spearman_slates == 2  # both boards scored...
+    assert m.spearman_ordered_slates == 0  # ...and neither was actually ordered
+
+
+def test_a_slate_where_everyone_scored_the_same_is_skipped_not_charged_as_zero():
+    """No prediction could have ordered that board, so it is not the predictor's zero to carry."""
+    preds = pd.DataFrame(
+        {
+            "position": ["DEF"] * 2,
+            "season": [2018, 2018],
+            "week": [1, 1],
+            "pred": [3.0, 9.0],  # a real ordering, offered
+            "actual": [7.0, 7.0],  # every defense scored the same
+        }
+    )
+    m = per_position_metrics(preds)["DEF"]
     assert m.spearman is None
     assert m.spearman_slates == 0
+
+
+def test_a_mostly_flat_slate_is_diluted_by_the_boards_it_stayed_silent_on():
+    """The real ``LaggedExpectedPoints``/K shape, in miniature: one real value against a block of ties.
+
+    Under the old "skip the flat boards" rule the ρ here would be the perfect +1 of the single board
+    that spoke. Scoring the silent boards as 0 puts that 1 in its true context.
+    """
+    rows = []
+    for season in (2018, 2019, 2020, 2021):
+        # Only 2018 gets a real ordering, and it is a perfect one (ρ = +1); the other three boards
+        # are pure fallback, so the baseline said nothing about them at all.
+        for p, a in [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]:
+            rows.append(
+                {
+                    "position": "K",
+                    "season": season,
+                    "week": 1,
+                    "pred": p if season == 2018 else 5.0,
+                    "actual": a,
+                }
+            )
+    m = per_position_metrics(pd.DataFrame(rows))["K"]
+    assert m.spearman_slates == 4
+    assert m.spearman_ordered_slates == 1
+    assert m.spearman == pytest.approx(1.0 / 4)  # not 1.0 — three boards it declined to order
 
 
 @pytest.mark.parametrize(
@@ -255,7 +317,8 @@ def test_a_constant_prediction_slate_contributes_no_spearman():
     [
         ([1, 2, 3], [10, 20, 30], 1.0),
         ([1, 2, 3], [30, 20, 10], -1.0),
-        ([1, 1, 1], [1, 2, 3], None),  # constant input → undefined
+        ([1, 1, 1], [1, 2, 3], 0.0),  # constant *prediction* → no ordering offered → scored 0
+        ([1, 2, 3], [5, 5, 5], None),  # constant *actual* → undefined for anyone
         ([1], [1], None),  # n < 2 → undefined
     ],
 )
@@ -282,6 +345,21 @@ def test_calibration_is_by_decile_and_realized_climbs_with_the_predicted_decile(
 @pytest.mark.parametrize("factory", [TrailingMean, PriorSeasonRank, LaggedExpectedPoints])
 def test_each_baseline_satisfies_the_predictor_protocol(factory):
     assert isinstance(factory(), Predictor)
+
+
+def test_the_predictor_protocol_rejects_an_object_missing_predict():
+    """``runtime_checkable`` checks method *presence* only, so pin that it at least does that.
+
+    It cannot check signatures or return types — which is why ``evaluate`` re-checks at runtime that
+    what came back is a Series (``test_evaluate_rejects_a_predictor_that_does_not_return_a_series``)
+    rather than trusting this ``isinstance``.
+    """
+
+    class FitOnly:
+        def fit(self, frame):
+            return self
+
+    assert not isinstance(FitOnly(), Predictor)
 
 
 def test_trailing_mean_ignores_the_current_weeks_own_label():
@@ -423,30 +501,44 @@ def test_evaluate_on_the_real_baselines_is_per_position_and_covers_the_cohort():
 
 
 # =============================================================== the committed report follows its data
-def _pm(pos: str, mae: float, rho: float | None) -> PositionMetrics:
+def _pm(
+    pos: str, mae: float, rho: float | None, *, n: int = 100, ordered: int | None = None
+) -> PositionMetrics:
     cal = pd.DataFrame(
         {"decile": [1, 2], "n": [50, 50], "pred_mean": [1.0, 9.0], "realized_mean": [1.0, 9.0]}
     )
+    slates = 0 if rho is None else 5
     return PositionMetrics(
-        position=pos, n=100, mae=mae, rmse=mae * 1.2, spearman=rho,
-        spearman_slates=(0 if rho is None else 5), calibration=cal,
+        position=pos, n=n, mae=mae, rmse=mae * 1.2, spearman=rho,
+        spearman_slates=slates,
+        spearman_ordered_slates=slates if ordered is None else ordered,
+        calibration=cal,
     )
 
 
-def _result(name: str, per: dict[str, tuple[float, float | None]]) -> EvalResult:
+def _result(
+    name: str,
+    per: dict[str, tuple[float, float | None]],
+    *,
+    test_seasons: tuple[int, ...] = (2018, 2019),
+    n: int = 100,
+    ordered: dict[str, int] | None = None,
+) -> EvalResult:
     return EvalResult(
         predictor=name,
-        test_seasons=(2018, 2019),
-        per_position={pos: _pm(pos, mae, rho) for pos, (mae, rho) in per.items()},
+        test_seasons=test_seasons,
+        per_position={
+            pos: _pm(pos, mae, rho, n=n, ordered=(ordered or {}).get(pos))
+            for pos, (mae, rho) in per.items()
+        },
         predictions=pd.DataFrame(),
     )
 
 
-def _render(results) -> str:
+def _render(results, *, records=()) -> str:
     return eb.render_report(
         results,
         seasons=[2016, 2025],
-        test_seasons=[2018, 2025],
         scoring_keys=42,
         partitions=1,
         league_name="Test league",
@@ -454,6 +546,7 @@ def _render(results) -> str:
         frame_rows=1000,
         cohort_rows=600,
         players=50,
+        records=records,
     )
 
 
@@ -483,17 +576,86 @@ def test_report_finding_2_uses_the_agreement_branch_when_one_baseline_wins_both(
     assert "agree" in _finding(_render([a, b]), 2).lower()
 
 
-def test_report_finding_3_reads_the_missing_ordering_positions_from_the_data():
-    lep = _result("LaggedExpectedPoints", {"QB": (3.0, 0.4), "K": (4.0, None), "DEF": (4.0, None)})
-    other = _result("TrailingMean", {"QB": (3.5, 0.35), "K": (3.9, 0.1), "DEF": (3.8, 0.1)})
-    finding = _finding(_render([other, lep]), 3)
-    assert "K, DEF" in finding
-    assert "ρ = —" in finding
+def test_report_finding_3_counts_the_boards_the_baseline_actually_ordered():
+    """The real defect this replaced: the prose said "kickers ... no ordering" while the table three
+    lines below showed K with a ρ over 7 slates. The claim is now the count itself.
+    """
+    lep = _result(
+        "LaggedExpectedPoints",
+        {"QB": (3.0, 0.4), "K": (4.0, -0.06), "DEF": (4.0, 0.0)},
+        ordered={"QB": 5, "K": 1, "DEF": 0},
+    )
+    finding = _finding(_render([lep]), 3)
+    assert "**K** 1/5" in finding
+    assert "**DEF** 0/5" in finding
+    assert "QB 5/5" in finding
+
+
+def test_report_finding_3_does_not_call_a_position_flat_while_its_table_shows_an_ordering():
+    """A position the baseline orders on every board must not be named as one it does not order.
+
+    This is the assertion the old hardcoded clause could not make: it named K and DEF from memory,
+    so it stayed true-looking no matter what the table said.
+    """
+    lep = _result(
+        "LaggedExpectedPoints",
+        {"K": (4.0, 0.30), "DEF": (4.0, 0.0)},
+        ordered={"K": 5, "DEF": 0},
+    )
+    finding = _finding(_render([lep]), 3)
+    assert "**DEF** 0/5" in finding
+    assert "**K**" not in finding  # K ordered every board — it is not one of the flat ones
 
 
 def test_report_finding_3_flips_when_expected_points_orders_every_position():
     lep = _result("LaggedExpectedPoints", {"K": (4.0, 0.2), "DEF": (4.0, 0.2)})
     assert "not expected" in _finding(_render([lep]), 3)
+
+
+def test_report_finding_4_compares_coverage_across_baselines_instead_of_printing_the_first():
+    """The claim "all N cover the same rows" has to survive a baseline that does not.
+
+    The original read ``results[0]``'s counts and printed them under the sentence regardless, so a
+    half-covering predictor left the claim standing next to its own counterexample.
+    """
+    full = _result("Full", {"K": (4.0, 0.2)}, n=4238)
+    holey = _result("Holey", {"K": (4.0, 0.2)}, n=2118)
+    finding = _finding(_render([full, holey]), 4)
+
+    assert "do NOT all cover the same rows" in finding
+    assert "Full 4,238" in finding
+    assert "Holey 2,118" in finding
+
+
+def test_report_finding_4_affirms_equal_coverage_only_when_it_is_equal():
+    a = _result("A", {"K": (4.0, 0.2)}, n=4238)
+    b = _result("B", {"K": (4.5, 0.1)}, n=4238)
+    finding = _finding(_render([a, b]), 4)
+    assert "All 2 baselines cover the same rows" in finding  # the count is derived too
+    assert "K 4,238" in finding
+
+
+def test_report_header_states_the_seasons_actually_scored_not_the_default_span():
+    """``--seasons 2020-2022`` scored 2021-2022 while the header advertised 2018-2025."""
+    r = _result("A", {"QB": (3.0, 0.4)}, test_seasons=(2021, 2022))
+    header = next(ln for ln in _render([r]).splitlines() if ln.startswith("- **Train span"))
+    assert "2021–2022" in header
+    assert "2018–2025" not in header
+
+
+def test_report_counts_warnings_from_the_captured_log_and_quotes_them():
+    """A skipped test season is a WARNING; a silent bar would be narrower than its header."""
+    records = [(30, "WARNING", "model.evaluate", "no rows for test season 2018 — skipping it")]
+    report = _render([_result("A", {"QB": (3.0, 0.4)})], records=records)
+
+    assert "emitted **1** WARNING-level" in _finding(report, 5)
+    assert "no rows for test season 2018" in report.split("## Warnings (verbatim)")[1]
+
+
+def test_report_says_zero_warnings_only_when_the_log_carried_none():
+    report = _render([_result("A", {"QB": (3.0, 0.4)})])
+    assert "**Zero warning" in _finding(report, 5)
+    assert "_None._" in report.split("## Warnings (verbatim)")[1]
 
 
 def test_report_metric_table_prints_an_em_dash_for_an_undefined_spearman():
@@ -510,3 +672,23 @@ def test_report_best_baseline_table_reflects_the_measured_winners():
     wr_row = next(line for line in section.splitlines() if line.strip().startswith("| WR |"))
     assert "A (2.00)" in wr_row  # lowest MAE column
     assert "B (0.800)" in wr_row  # highest ρ column
+
+
+def test_report_flags_a_rho_comparison_made_over_different_slate_universes():
+    """The ρ column is only a like-for-like comparison while the baselines were scored on one set of
+    boards. When they were not, the report has to say so rather than crown a winner silently."""
+    a = _result("A", {"WR": (2.0, 0.2)})
+    b = _result("B", {"WR": (3.0, 0.8)})
+    object.__setattr__(b.per_position["WR"], "spearman_slates", 7)  # frozen dataclass
+    section = _render([a, b]).split("## Best baseline per position")[1]
+    assert "at WR they are **not**" in section
+    assert "indicative only" in section
+
+
+def test_report_warns_that_a_flat_baselines_calibration_gap_is_arithmetic_not_evidence():
+    """LaggedExpectedPoints posts the best `gap` in the table for K/DEF *because* it predicts the
+    mean. Left unflagged, the most degenerate predictor reads as the best calibrated one."""
+    lep = _result("LaggedExpectedPoints", {"K": (4.0, 0.0)}, ordered={"K": 0})
+    section = _render([lep]).split("## Calibration")[1]
+    assert "LaggedExpectedPoints/K" in section
+    assert "by construction" in section

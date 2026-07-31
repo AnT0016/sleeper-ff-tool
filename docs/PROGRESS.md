@@ -547,12 +547,18 @@ Tickets — **2 of 8 shipped:**
       no random/k-fold splitter to select. Two non-obvious calls, both documented: the Spearman grain is
       `(season, week)` not a bare week number (which would fold different seasons' week-5 boards into one
       correlation), and the three baselines share a learned **per-position-mean fallback** for cold-start
-      rows so they are graded on one identical row universe. Recorded bar (lowest held-out MAE):
-      **QB/RB/WR/TE -> TrailingMean 6.81 / 4.72 / 4.42 / 3.42**; **K/DEF -> LaggedExpectedPoints 3.68 /
-      4.95**. The surprise the per-position grain exists to catch: for **K the flat fallback wins MAE yet
-      carries ~zero ordering (rho ~0.03-0.07)**, and `exp_points` is skill-only so `LaggedExpectedPoints`
-      admits **no rho slate for DEF (—)**. Every #29-#33 improvement claim is now checkable against a
-      fixed number.
+      rows so they are graded on one identical row universe. Third call, added in review: **a flat
+      prediction scores rho = 0, it is not excused.** Skipping those boards had `LaggedExpectedPoints`
+      posting a K rho averaged over the 7 boards of 141 it happened to speak on, in the same column as a
+      baseline's mean over all 141 — so the report now carries an `ordered` count next to every rho.
+      Recorded bar (lowest held-out MAE): **QB/RB/WR/TE -> TrailingMean 6.81 / 4.72 / 4.42 / 3.42**;
+      **K/DEF -> LaggedExpectedPoints 3.68 / 4.95**. The surprise the per-position grain exists to catch:
+      that K/DEF winner **is the learned position mean** — `exp_points` is an offensive-skill signal, so
+      `LaggedExpectedPoints` gives a real ordering on **7/141 K boards and 0/141 DEF boards**, and its rho
+      there (-0.003 / 0.000) is a zero it earned by declining to order. **For K and DEF the bar to beat is
+      literally "beat the mean"**, and no baseline orders them at all (best rho: K 0.067, DEF 0.095, vs
+      0.4-0.6 at the skill positions) — that is #30's problem statement, measured. Every #29-#33
+      improvement claim is now checkable against a fixed number.
 - [ ] **#29 weekly model (QB/RB/WR/TE)** — must beat all three baselines on **both** MAE and within-week
       rank correlation; week-1 cold start scored separately.
 - [ ] **#30 weekly K + DST** — predicts **stat components** scored through the Phase 1 engine, never a

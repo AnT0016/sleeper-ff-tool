@@ -25,6 +25,11 @@ The three rules this module enforces, each a place a leak or an illusion hides
   rho per slate and averages them. Because the walk-forward pool spans many test seasons, a *slate* is
   one ``(season, week)`` — a bare week number would fold 2019 week 5 into 2022 week 5, two decisions
   that were never on the same board, and let a per-season fallback level read as a fake ordering.
+  **A predictor that emits one constant across a slate scores rho = 0 on it, not "undefined".** It
+  offered no ordering, and that is a result. Excusing those slates instead would average a predictor
+  over only the boards it happened to say something on, so two predictors' rho would be means over
+  different universes and the larger number could be the one that answered less often
+  (:attr:`PositionMetrics.spearman_ordered_slates` reports how often it actually did answer).
 
 Scoring note: the baselines predict points directly, which is legitimate *for baselines* — they are
 the naive bar, not a model. The Decision #2 rule ("models predict stats, the engine scores them")
@@ -88,12 +93,25 @@ class LeakError(AssertionError):
 
 
 def assert_walk_forward(train: pd.DataFrame, test_season: int) -> None:
-    """Raise :class:`LeakError` unless every training row is strictly earlier than ``test_season``."""
+    """Raise :class:`LeakError` unless every training row is strictly earlier than ``test_season``.
+
+    Fails closed on a season it cannot read, too. ``pd.to_numeric(..., errors="coerce")`` turns an
+    unparseable season into ``NaN``, and a ``NaN`` compares false against every threshold — so a row
+    the gate cannot parse is a row the gate cannot clear, and silently passing it would be the one
+    outcome a fail-closed guard must not have. ``walk_forward_splits`` never produces such a row (it
+    filters on the same coercion), so this can only fire on a hand-built :class:`Split`.
+    """
     if "season" not in train.columns:
         raise LeakError("train frame has no 'season' column, so a leak cannot even be checked")
     if train.empty:
         return
     seasons = pd.to_numeric(train["season"], errors="coerce")
+    if bool(seasons.isna().any()):
+        unreadable = sorted({str(v) for v in train.loc[seasons.isna(), "season"].unique()})[:5]
+        raise LeakError(
+            f"train frame has {int(seasons.isna().sum())} row(s) whose 'season' does not parse as a "
+            f"number (e.g. {unreadable}); a season the gate cannot read is a leak it cannot rule out"
+        )
     leaked = sorted({int(s) for s in seasons.dropna().unique() if int(s) >= test_season})
     if leaked:
         raise LeakError(
@@ -155,19 +173,31 @@ def walk_forward_splits(
 
 # --------------------------------------------------------------------------- metrics
 def spearman(pred: pd.Series, actual: pd.Series) -> float | None:
-    """Spearman rank correlation, or ``None`` where it is undefined (n < 2, or a constant input).
+    """Spearman rank correlation; ``0.0`` for a no-ordering prediction, ``None`` where undefined.
 
     Computed as the Pearson correlation of average ranks (``np.corrcoef``) rather than via
     ``Series.corr(method="spearman")``, which pulls in scipy — a dependency this project does not
     carry. Average-rank ties are the textbook Spearman convention.
+
+    The two degenerate cases are deliberately *not* symmetric:
+
+    * A **constant prediction** scores ``0.0``. The predictor was asked to order the board and
+      declined; a no-information ordering has expected rank correlation zero, and scoring it as one
+      keeps every predictor's rho a mean over the same slates. Returning ``None`` here would let a
+      predictor that answers on 7 boards out of 141 post a rho next to one that answered on all 141.
+    * A **constant actual** returns ``None`` — every player really did score the same, so no
+      prediction could have ordered them. That is the board's fault, not the predictor's, and
+      charging a zero for it would penalise whichever model happened to draw that week.
     """
     mask = pred.notna() & actual.notna()
     if int(mask.sum()) < 2:
         return None
     p = pred[mask]
     a = actual[mask]
-    if p.nunique() < 2 or a.nunique() < 2:
+    if a.nunique() < 2:
         return None
+    if p.nunique() < 2:
+        return 0.0
     rho = float(np.corrcoef(p.rank().to_numpy(), a.rank().to_numpy())[0, 1])
     return None if np.isnan(rho) else rho
 
@@ -211,7 +241,8 @@ class PositionMetrics:
     mae: float
     rmse: float
     spearman: float | None  # mean within-(season, week) rho, over the slates that admit one
-    spearman_slates: int  # number of (season, week) slates that contributed a rho
+    spearman_slates: int  # (season, week) slates that contributed a rho (a flat one contributes 0)
+    spearman_ordered_slates: int  # of those, how many the predictor gave a non-constant ordering on
     calibration: pd.DataFrame
 
 
@@ -236,7 +267,10 @@ def per_position_metrics(
     return is a ``dict`` keyed by position on purpose: a pooled summary is not something a caller can
     ask this function for, because a pooled metric is dominated by cross-position scoring scale
     (Decision #5). Spearman is computed per ``(season, week)`` slate and averaged — never across
-    slates (see the module docstring for why a bare week number is the wrong grain here).
+    slates (see the module docstring for why a bare week number is the wrong grain here). A slate the
+    predictor answered with one constant counts as a scored rho of 0 and is *not* counted in
+    ``spearman_ordered_slates``, so the mean and the number of boards it was actually earned on are
+    both visible.
     """
     out: dict[str, PositionMetrics] = {}
     for pos in positions:
@@ -245,11 +279,14 @@ def per_position_metrics(
         if valid.empty:
             continue
         err = (valid["pred"] - valid["actual"]).to_numpy(dtype=float)
-        rhos = [
-            rho
-            for _slate, grp in valid.groupby(["season", "week"], sort=True)
-            if (rho := spearman(grp["pred"], grp["actual"])) is not None
-        ]
+        rhos: list[float] = []
+        ordered = 0
+        for _slate, grp in valid.groupby(["season", "week"], sort=True):
+            rho = spearman(grp["pred"], grp["actual"])
+            if rho is None:  # the board itself admits no ordering — see spearman()
+                continue
+            rhos.append(rho)
+            ordered += int(grp["pred"].nunique() > 1)
         out[pos] = PositionMetrics(
             position=pos,
             n=int(len(valid)),
@@ -257,6 +294,7 @@ def per_position_metrics(
             rmse=float(np.sqrt(np.mean(err**2))),
             spearman=float(np.mean(rhos)) if rhos else None,
             spearman_slates=len(rhos),
+            spearman_ordered_slates=ordered,
             calibration=calibration_by_decile(valid["pred"], valid["actual"]),
         )
     return out
