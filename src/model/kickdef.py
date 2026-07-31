@@ -41,7 +41,7 @@ probability exactly where it is most expensive to get wrong. So the grid is **co
 (:data:`DEFAULT_PA_BINS` bins); within a narrow ``μ`` band the residuals shifted by a same-band ``μ``
 reproduce realistic non-negative points and the clamp barely bites. ``scripts/eval_kickdef.py`` reports
 predicted-vs-realized rate for ``pts_allow_0`` **and** ``pts_allow ≤ 6`` by predicted-``μ`` decile — a
-direct calibration check on the left tail, the ``≤ 6`` cell added because shutouts are ~0.3% of rows and
+direct calibration check on the left tail, the ``≤ 6`` cell added because shutouts are ~1% of rows and
 too thin to read alone.
 
 Bar, gate and safety (Decisions #8, #9)
@@ -83,7 +83,6 @@ from model.evaluate import (
     DEFAULT_TEST_SEASONS,
     LABEL_COL,
     PositionMetrics,
-    evaluate,
     per_position_metrics,
     walk_forward_splits,
 )
@@ -149,7 +148,10 @@ _RESID_QUANTILES = 101
 
 #: Minimum held-out rows for a (position × cohort) cell's gate to be *decided* on evidence. Below it the
 #: cell defers — a 400-row cold-start decision must not read like a 4,000-row warm one (Decision #9 item
-#: 6 / the review). K cold-start is ~250-400 held-out rows, so this is the line it sits just above.
+#: 6 / the review). Declared **before** measuring, like :data:`ANCHOR_FLOOR_PCT`: 200 is the point below
+#: which a per-slate ρ over ~8 held-out seasons is too few boards to read, not a line drawn around where
+#: the cells happened to land. The cold cells sit close to it either way, so they are the ones #34's
+#: live-week re-check should watch first.
 _MIN_CELL_N = 200
 
 #: Two metrics within this are the same number (a deferred cell predicts exactly its baseline).
@@ -853,7 +855,7 @@ def recorded_gate(path: str | Path = DEFAULT_ARTIFACT_PATH) -> tuple[str, ...]:
     model silently). Cached, so the read happens once per process.
     """
     try:
-        gate = json.loads(Path(path).read_text(encoding="utf-8"))["deferral"]
+        gate = json.loads(Path(path).read_text(encoding="utf-8"))["defer"]
         return tuple(str(c) for c in gate)
     except (OSError, ValueError, KeyError, TypeError):
         return tuple(cell_key(p, cold) for p in KICKDEF_POSITIONS for cold in (False, True))
@@ -1048,31 +1050,7 @@ def pts_allow_calibration(
     return pd.DataFrame(out_rows)
 
 
-def measure_gate(
-    frame: pd.DataFrame,
-    scoring: Mapping[str, float],
-    *,
-    n_pa_bins: int = DEFAULT_PA_BINS,
-    positions: Sequence[str] = KICKDEF_POSITIONS,
-    test_seasons: Iterable[int] = DEFAULT_TEST_SEASONS,
-    min_n: int = _MIN_CELL_N,
-) -> tuple[str, ...]:
-    """Measure the per-cell gate by walk-forward: which cells the component model does not win.
-
-    Runs the pure-component model and the three baselines through the harness, slices each into the four
-    cells, and returns :func:`deferred_cells`. The same measurement ``scripts/eval_kickdef.py`` reports;
-    a fit uses it so the committed gate is measured, not hand-set.
-    """
-    comp = evaluate(
-        component_model(scoring, n_pa_bins=n_pa_bins), frame, positions=positions, test_seasons=test_seasons
-    )
-    comp_cells = cell_metrics(comp.predictions, frame, positions=positions)
-    base_cells = {
-        name: cell_metrics(
-            evaluate(factory(), frame, positions=positions, test_seasons=test_seasons).predictions,
-            frame,
-            positions=positions,
-        )
-        for name, factory in _BASELINE_FACTORIES.items()
-    }
-    return deferred_cells(comp_cells, base_cells, positions=positions, min_n=min_n)
+#: The gate itself is measured by ``scripts/eval_kickdef.py``, which already holds the component and
+#: baseline :class:`~model.evaluate.EvalResult`s it needs and slices them with :func:`cell_metrics` +
+#: :func:`deferred_cells`. A convenience wrapper here would re-run those evaluations a second time, so
+#: there deliberately isn't one — the eval is the single path that produces the committed gate.
