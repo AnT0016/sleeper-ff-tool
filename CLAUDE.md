@@ -82,6 +82,7 @@ In-house models over `build_training_frame`. Full spec: **[docs/plans/modeling.m
 - **Splits are walk-forward by season**, never random over player-weeks (a player's own adjacent weeks leak). Metrics are **per position**; a pooled metric is dominated by cross-position scoring scale.
 - **Selectable, not default.** Model output replaces Sleeper only after beating it on **both** MAE and within-week Spearman ρ, per position, over **≥ 4 live 2026 weeks**.
 - The draft model is **a separate model, not an aggregation** of the weekly one — no season-grain training data exists, and the weekly features are all absent in August.
+- **Every model ticket meets the evidence-and-shipping contract** ([docs/plans/modeling.md](docs/plans/modeling.md) Decision #9): measured on the real lake from a regenerable artifact, revert-checked guards, safe-by-default with the diagnostic as the explicit opt-out, no write-only artifact, tests built the way production constructs the model, and a verdict scoped per position (three positions are not six).
 
 ## Build order (do NOT skip ahead)
 1. Sleeper client + scoring engine. **Validate first:** re-score last season's nflverse actuals and confirm totals match Sleeper's reported points for ~20 players across all positions (incl. K & DEF) before building anything else.
