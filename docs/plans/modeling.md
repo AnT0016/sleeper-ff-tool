@@ -334,3 +334,26 @@ is the only honest "beat the market" grade (finding #1).
   the training frame the way `TrailingMean` derives its within-season lag — so its real cost is the
   warm-up trap #31 hit (a feature derived from "first appearance in the window" is 100% wrong in the
   earliest built season and must not train that season), not new collection scope.
+- **Decision #9 — The evidence-and-shipping contract every model ticket is held to.** Surfaced across the
+  #27–#29 reviews; #30–#34 inherit it rather than restate it.
+  1. **Measured or not met** — no acceptance number that is not derived from a committed, regenerable
+     artifact (`scripts/eval_*.py` → `docs/*.md`, pure `render_report`, warnings captured and counted).
+     Synthetic tests pin **mechanics only**, never a bar-clearing number on a fixture engineered to
+     satisfy it (#31's defect).
+  2. **Revert-check every guard** — a test whose guarded code can be reverted with the test still green
+     pins nothing.
+  3. **Safe by default; the diagnostic is the explicit opt-out** — the shipped configuration is what the
+     bare constructor yields; the weaker/diagnostic variant takes an explicit argument
+     (`SeasonModel(require_usage=True)`; `WeeklyModel()` defers by default, vs the pure-ridge
+     `WeeklyModel(defer_cold_start=())`). The #29 review caught the default being the variant the artifact
+     records as *losing*.
+  4. **No write-only artifact** — whatever a fitted artifact records (a gate, weights), something must
+     read it back into a correctly-configured model (`load_fitted`), failing loud rather than degrading
+     silently when a part is unfit.
+  5. **Tests construct the object the way production will** — a test that always passes config explicitly
+     cannot catch a bad default; #34 constructs the weekly model for real.
+  6. **State where a claim holds** — a criterion that spans positions is met **per position**, or met
+     partially and the summary says which. #31 reported "beats the baseline on within-position ordering"
+     from a QB/RB/WR fixture against a six-position criterion; on the real lake it lost at K and DEF.
+     Item 1 catches the synthetic half of that; nothing else catches reporting three positions as if they
+     were six. Decision #5 governs the metric *grain*, not the *scope* of the verdict built on it.
