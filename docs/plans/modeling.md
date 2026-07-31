@@ -309,3 +309,28 @@ is the only honest "beat the market" grade (finding #1).
   would let a QB-only improvement masquerade as a general one.
 - **Decision #6 — Walk-forward by season; 2016–2017 are lag warm-up.** Random splits leak a player's own adjacent
   weeks. The first two seasons are consumed by the lag/EWMA windows and are not scored on.
+- **Decision #7 — The weekly skill model uses a points head, valid only while skill scoring is linear.** #29's
+  QB/RB/WR/TE model regresses the engine-scored `y_custom_points` directly rather than predicting stat
+  components (a reading of Decision #2). The equivalence it rests on is stated explicitly: this league's
+  skill scoring is **linear** in the stats (every skill key is a per-unit coefficient — `rec` 0.5,
+  `rush_yd` 0.1, `pass_td` 4 — with no bucket or threshold), so `E[points] = sum(coef · E[stat])` and
+  `score(E[X]) = E[score(X)]`: a points head is unbiased and identical in expectation to a component
+  head. This does **not** license a points head for #30 — K and DST are the opposite case, step functions
+  of stat buckets (`fgm_40_49` 4 vs `fgm_50p` 5; `pts_allow_0` 10 vs `1_6` 7) where `E[f(X)] ≠ f(E[X])`
+  and only a component model is unbiased. The equivalence also holds only while scoring stays linear, and
+  `LEAGUE_ID` still points at the 2026 test sandbox — so `model.weekly.assert_linear_skill_scoring` is a
+  fail-closed guard, run against the live scoring at every fit/eval, that **raises** if any skill-relevant
+  key is bonus/threshold-shaped. If the real 2026 league returns with a yardage bonus, the fit breaks
+  loudly rather than biasing the model silently.
+- **Decision #8 — Weekly cold start defers to the prior-season baseline, gated per position by measurement.**
+  A week-1 (or mid-season-debut) row carries no within-season lag, so the weekly ridge has only the Vegas
+  market there and — measured on the real lake (`docs/model-weekly.md` §B) — loses the cold start at all
+  four positions to `PriorSeasonRank`, which carries last season's level. So `model.weekly.WeeklyModel`
+  defers cold-start rows to `PriorSeasonRank`, but **per position and only where ridge was measured to
+  lose** (the same measured-gate shape as #31's DEF deferral, not a blanket rule): a position where ridge
+  wins its cold start is fielded. **Follow-up (not built here):** a prior-season points-per-game feature
+  would give the ridge real cold-start signal and likely close this gap; its trigger is the recorded
+  cold-start margin (§B). It does **not** need a Phase-8 assembler change — it is derivable in-model from
+  the training frame the way `TrailingMean` derives its within-season lag — so its real cost is the
+  warm-up trap #31 hit (a feature derived from "first appearance in the window" is 100% wrong in the
+  earliest built season and must not train that season), not new collection scope.
