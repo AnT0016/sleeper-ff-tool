@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **3 of 8 shipped:**
+Tickets — **4 of 8 shipped:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
@@ -559,8 +559,37 @@ Tickets — **3 of 8 shipped:**
       literally "beat the mean"**, and no baseline orders them at all (best rho: K 0.067, DEF 0.095, vs
       0.4-0.6 at the skill positions) — that is #30's problem statement, measured. Every #29-#33
       improvement claim is now checkable against a fixed number.
-- [ ] **#29 weekly model (QB/RB/WR/TE)** — must beat all three baselines on **both** MAE and within-week
-      rank correlation; week-1 cold start scored separately.
+- [x] **#29 weekly model (QB/RB/WR/TE)** — [src/model/weekly.py](../src/model/weekly.py) +
+      [scripts/eval_weekly.py](../scripts/eval_weekly.py) → [docs/model-weekly.md](model-weekly.md)
+      (the measured grade) + [src/model/fit/weekly_ridge.json](../src/model/fit/weekly_ridge.json) (the
+      committed, regenerable artifact) + tests. A per-position **closed-form ridge** on 19 pre-lock
+      features (usage lags + Vegas market + venue), reusing #31's solver — **no new dependency, because
+      ridge cleared the bar** (the third option, a numpy/lightgbm gradient booster as an
+      `[project.optional-dependencies]` extra the crons never install, was left unbuilt and logged as the
+      escalation path). Measured walk-forward 2018-2025 on the real lake (56,429 skill rows, **zero
+      warnings**): the shipped model **beats all three baselines on both MAE and within-slate ρ at all
+      four positions all-weeks** — QB 6.28/0.507, RB 4.42/0.656, WR 4.11/0.612, TE 3.16/0.534 vs the bar's
+      6.81/0.409, 4.72/0.577, 4.42/0.527, 3.42/0.432 (pure ridge alone also clears it; the re-run
+      baselines reproduce #28's committed bar to the digit). **Points head, guarded** (Decision #7): the
+      model regresses `y_custom_points` directly because this league's skill scoring is **linear** in the
+      stats, so `score(E[X]) = E[score(X)]` — and `assert_linear_skill_scoring` reads the live scoring at
+      every fit/eval and **raises** on any bonus/threshold skill key, so a real 2026 league with a yardage
+      bonus breaks loudly rather than biasing the model. #30 must not read this as license — its buckets
+      are the opposite case. **Cold start scored separately, per position** (Decision #8): on rows with no
+      within-season lag (week 1 + mid-season debuts) pure ridge has only the market and **loses all four**
+      to `PriorSeasonRank`'s prior-season level (QB ρ -0.276), so `WeeklyModel` **defers cold-start rows
+      to that baseline — but per position and only where ridge was measured to lose** (a measured gate,
+      the shape #31's DEF deferral established, never blanket). The review fix: the deferral is now the
+      **safe default** (`WeeklyModel()` reads the recorded gate from the artifact; pure ridge is the
+      explicit `defer_cold_start=()` diagnostic) so #34 cannot silently field the losing variant, and a
+      deferred row returns the contained baseline's number **to the bit** (revert-checked test). Feature
+      importances recorded (§E): usage-driven (RB `points_ewma` + rush/target share; WR/TE
+      `target_share_ewma`), **no top-5 feature is >50% null**, and the mostly-null families #27 flagged
+      are excluded with their measured rates. Artifact regenerates **byte-identical**. **Hands to #34** a
+      selectable weekly source (`WeeklyModel.load_fitted()` reads the artifact's gate + weights) and to
+      #32 a real per-position weekly error model; the prior-season-ppg feature that would close the
+      cold-start gap is logged as a Decision #8 follow-up (in-model derivable, its cost the warm-up trap,
+      not Phase-8 scope).
 - [ ] **#30 weekly K + DST** — predicts **stat components** scored through the Phase 1 engine, never a
       points-valued head; a **distribution** over the points-allowed bucket, because the buckets are
       discontinuous and a mean-then-bucket estimate is provably biased.
