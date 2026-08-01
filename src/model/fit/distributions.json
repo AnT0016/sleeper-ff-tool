@@ -1,0 +1,308 @@
+{
+  "diagnostics": {
+    "before_after_champ_odds": {
+      "both": 0.1532,
+      "cv_only": 0.1532,
+      "heuristic": 0.1678,
+      "injury_only": 0.1593
+    },
+    "expected_availability_fitted": {
+      "DEF": 0.9984,
+      "K": 0.9449,
+      "QB": 0.9158,
+      "RB": 0.8939,
+      "TE": 0.9006,
+      "WR": 0.8924
+    },
+    "expected_availability_heuristic": {
+      "DEF": 0.9984,
+      "K": 0.9937,
+      "QB": 0.9552,
+      "RB": 0.8936,
+      "TE": 0.9372,
+      "WR": 0.9372
+    },
+    "full_cohort_position_cv": {
+      "DEF": 0.2421,
+      "K": 0.3202,
+      "QB": 0.4558,
+      "RB": 0.6003,
+      "TE": 0.4678,
+      "WR": 0.4716
+    },
+    "injury_out_only_rate": {
+      "DEF": null,
+      "K": 0.0638,
+      "QB": 0.1348,
+      "RB": 0.136,
+      "TE": 0.1786,
+      "WR": 0.1793
+    },
+    "injury_wide_cohort_rate": {
+      "DEF": null,
+      "K": 0.1257,
+      "QB": 0.3192,
+      "RB": 0.3888,
+      "TE": 0.4325,
+      "WR": 0.3899
+    },
+    "season_cv_robustness_overall": [
+      {
+        "cv": 0.6517,
+        "factor_cv": 0.6274,
+        "n": 193,
+        "position": "QB",
+        "verdict": "heuristic-fallback"
+      },
+      {
+        "cv": 0.4907,
+        "factor_cv": 0.4425,
+        "n": 157,
+        "position": "RB",
+        "verdict": "fitted"
+      },
+      {
+        "cv": 0.3756,
+        "factor_cv": 0.3088,
+        "n": 236,
+        "position": "WR",
+        "verdict": "fitted"
+      },
+      {
+        "cv": 0.4006,
+        "factor_cv": 0.3332,
+        "n": 46,
+        "position": "TE",
+        "verdict": "fitted"
+      },
+      {
+        "cv": 0.3113,
+        "factor_cv": 0.2718,
+        "n": 126,
+        "position": "K",
+        "verdict": "fitted"
+      },
+      {
+        "cv": 0.2536,
+        "factor_cv": 0.1436,
+        "n": 190,
+        "position": "DEF",
+        "verdict": "fitted"
+      }
+    ],
+    "season_factor_coherence": [
+      {
+        "fitted_factor_cv": 0.4215,
+        "fitted_season_cv": 0.4515,
+        "game_cv": 0.6158,
+        "position": "QB",
+        "shipped_factor_cv": 0.4215,
+        "shipped_season_cv": 0.4515,
+        "verdict": "fitted"
+      },
+      {
+        "fitted_factor_cv": 0.5637,
+        "fitted_season_cv": 0.606,
+        "game_cv": 0.7991,
+        "position": "RB",
+        "shipped_factor_cv": 0.25,
+        "shipped_season_cv": 0.32,
+        "verdict": "heuristic-fallback"
+      },
+      {
+        "fitted_factor_cv": 0.3513,
+        "fitted_season_cv": 0.4126,
+        "game_cv": 0.8422,
+        "position": "WR",
+        "shipped_factor_cv": 0.3513,
+        "shipped_season_cv": 0.4126,
+        "verdict": "fitted"
+      },
+      {
+        "fitted_factor_cv": 0.3777,
+        "fitted_season_cv": 0.4399,
+        "game_cv": 0.8702,
+        "position": "TE",
+        "shipped_factor_cv": 0.3777,
+        "shipped_season_cv": 0.4399,
+        "verdict": "fitted"
+      },
+      {
+        "fitted_factor_cv": 0.1945,
+        "fitted_season_cv": 0.2452,
+        "game_cv": 0.604,
+        "position": "K",
+        "shipped_factor_cv": 0.1945,
+        "shipped_season_cv": 0.2452,
+        "verdict": "fitted"
+      },
+      {
+        "fitted_factor_cv": 0.1231,
+        "fitted_season_cv": 0.2421,
+        "game_cv": 0.8531,
+        "position": "DEF",
+        "shipped_factor_cv": 0.1231,
+        "shipped_season_cv": 0.2421,
+        "verdict": "fitted"
+      }
+    ],
+    "upper_bound_position_cv": {
+      "DEF": 0.3449,
+      "K": 0.5267,
+      "QB": 1.067,
+      "RB": 0.9373,
+      "TE": 0.5811,
+      "WR": 0.5724
+    }
+  },
+  "game_cv": {
+    "DEF": {
+      "n": 4156,
+      "reason": null,
+      "value": 0.8531,
+      "verdict": "fitted"
+    },
+    "K": {
+      "n": 4238,
+      "reason": null,
+      "value": 0.604,
+      "verdict": "fitted"
+    },
+    "QB": {
+      "n": 4742,
+      "reason": null,
+      "value": 0.6158,
+      "verdict": "fitted"
+    },
+    "RB": {
+      "n": 8366,
+      "reason": null,
+      "value": 0.7991,
+      "verdict": "fitted"
+    },
+    "TE": {
+      "n": 4892,
+      "reason": null,
+      "value": 0.8702,
+      "verdict": "fitted"
+    },
+    "WR": {
+      "n": 13040,
+      "reason": null,
+      "value": 0.8422,
+      "verdict": "fitted"
+    }
+  },
+  "generated": "2026-08-01",
+  "injury_risk": {
+    "DEF": {
+      "games": null,
+      "n": 0,
+      "p": null,
+      "reason": "never on the injury report (team defense)",
+      "verdict": "heuristic-fallback"
+    },
+    "K": {
+      "games": 5.5,
+      "n": 94,
+      "p": 0.1702,
+      "reason": null,
+      "verdict": "fitted"
+    },
+    "QB": {
+      "games": 4.3793,
+      "n": 178,
+      "p": 0.3258,
+      "reason": null,
+      "verdict": "fitted"
+    },
+    "RB": {
+      "games": 4.4406,
+      "n": 353,
+      "p": 0.4051,
+      "reason": null,
+      "verdict": "fitted"
+    },
+    "TE": {
+      "games": 4.6275,
+      "n": 140,
+      "p": 0.3643,
+      "reason": null,
+      "verdict": "fitted"
+    },
+    "WR": {
+      "games": 4.4947,
+      "n": 463,
+      "p": 0.406,
+      "reason": null,
+      "verdict": "fitted"
+    }
+  },
+  "model": "distributions",
+  "position_cv": {
+    "DEF": {
+      "n": 96,
+      "reason": null,
+      "value": 0.2421,
+      "verdict": "fitted"
+    },
+    "K": {
+      "n": 80,
+      "reason": null,
+      "value": 0.2452,
+      "verdict": "fitted"
+    },
+    "QB": {
+      "n": 134,
+      "reason": null,
+      "value": 0.4515,
+      "verdict": "fitted"
+    },
+    "RB": {
+      "n": 241,
+      "reason": "implied season-factor CV 0.56 > 0.5 on the drafted cohort \u2014 not coherent with the game CV (a season-baseline swing this large exceeds what a season factor carries); wide-cohort CV recorded as an upper bound",
+      "value": 0.606,
+      "verdict": "heuristic-fallback"
+    },
+    "TE": {
+      "n": 93,
+      "reason": null,
+      "value": 0.4399,
+      "verdict": "fitted"
+    },
+    "WR": {
+      "n": 292,
+      "reason": null,
+      "value": 0.4126,
+      "verdict": "fitted"
+    }
+  },
+  "season_games": 17,
+  "test_seasons": [
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "thresholds": {
+    "game_pred_floor": 4.0,
+    "max_season_factor_cv": 0.5,
+    "min_cv_n": 40,
+    "min_injury_seasons": 50,
+    "season_cohort_by_position": {
+      "DEF": 12,
+      "K": 12,
+      "QB": 24,
+      "RB": 48,
+      "TE": 18,
+      "WR": 60
+    },
+    "season_cohort_total": 168,
+    "setback_min_weeks": 2,
+    "wide_season_pred_floor": 50.0
+  }
+}

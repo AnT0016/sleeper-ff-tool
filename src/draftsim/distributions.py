@@ -5,29 +5,62 @@ by the **distribution** of season outcomes — not just expected value — every
 season total per player and applies a durability haircut. Drafters never see these draws; only the
 post-draft evaluation does (see :mod:`draftsim.engine`).
 
-ASSUMPTIONS (heuristic, *not* fitted to data — this is a directional v1 tool, and these knobs are
-printed in the report so they can be judged):
+The knobs are FITTED, with a heuristic fallback (Phase 9, ticket #32)
+--------------------------------------------------------------------
+``POSITION_CV``, ``GAME_CV`` and ``INJURY_RISK`` are earned from the lake, not hand-picked. The fit
+lives in a committed data artifact (``src/model/fit/distributions.json``, produced by
+``scripts/eval_distributions.py`` → the measured report ``docs/model-distributions.md``); this module
+**reads** it at import and merges the fitted value **over** the heuristic constant **per position**,
+so a position the fit could not decide keeps its heuristic. Where each number came from:
 
 * **Season points ~ lognormal**, parameterised so its *mean* equals the projection and its
-  *coefficient of variation* (CV = std / mean) is a per-position constant. Lognormal keeps season
-  totals non-negative and right-skewed — real fantasy seasons have a fat upside tail (a league
-  winner) and a floor at zero.
-* **Injuries** are modelled as one *significant* multi-week "setback" per season: a Bernoulli per
-  position; if it fires, games missed ~ Poisson(severity) clipped to ``[1, SEASON_GAMES]``. The
-  resulting availability multiplier ``(games_played / SEASON_GAMES)`` scales the sampled season
-  total. Week-to-week noise (a quiet game, a dinged ankle) is already inside the CV above — the
-  setback is the *durability* risk you'd want a real rostered backup for.
+  *coefficient of variation* (CV = std / mean) is a per-position constant :data:`POSITION_CV`. Lognormal
+  keeps season totals non-negative and right-skewed. The CV is fitted from :class:`model.season.SeasonModel`'s
+  **walk-forward out-of-sample** residuals ``actual/pred`` on the **drafted cohort** (the per-season top-N
+  by projection this league rosters — fitting a per-position knob over the wider fringe measures the
+  volatile backups the sim never drafts), **setback-free** — because week-to-week noise is already inside
+  this CV while the *durability* risk below owns games-missed, the two must not double-count. A position
+  whose fitted CV is not **coherent** with its game CV under the sim's season-factor identity keeps the
+  heuristic (its residual is recorded as an upper bound in the report). The fit is a per-position
+  upper-ish bound anyway: SeasonModel's residual bounds the spread around *its own* projection, wider than
+  around a market projection the sim will eventually use.
+* **Single-game CV** :data:`GAME_CV` — fitted from the weekly models' out-of-sample residuals
+  (:class:`model.weekly.WeeklyModel` for QB/RB/WR/TE, :class:`model.kickdef.KickDefModel` for K/DEF). A
+  week with no stat line does not exist in the frame (an inactive player is simply absent — the #29
+  finding), so these residuals are already conditioned on availability; no healthy filter is needed at
+  game grain. Shared with the win-probability model and the season sim so all three stay consistent.
+* **Injuries** are one *significant* multi-week "setback" per season: a Bernoulli per position; if it
+  fires, games missed ~ Poisson(severity) clipped to ``[1, SEASON_GAMES]``. The availability multiplier
+  ``(games_played / SEASON_GAMES)`` scales the sampled season total. :data:`INJURY_RISK` is fitted from
+  contiguous ``report_status == "Out"`` runs (≥ 2 weeks) in ``nflverse_injuries`` over a tenure-bounded
+  denominator; **DST is never on the injury report, so it keeps the heuristic** (and any position too
+  thin to fit does too — that is what the fallback is for).
+
+Safe by default (spec Decision #9). A missing or unreadable artifact → **every** position falls back to
+its heuristic; a position marked ``heuristic-fallback`` in the artifact → that position falls back. The
+merge always yields all six positions, never a ``{}``-shaped emptiness that would read as "fitted with
+zero spread". :func:`use_knobs` is the runtime swap used by the before/after harness and the tests.
 """
 
 from __future__ import annotations
+
+import json
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from pathlib import Path
 
 import numpy as np
 
 SEASON_GAMES = 17
 
-#: Coefficient of variation (std / mean) of season fantasy points, by position. QB/K are the most
-#: predictable; TE/RB the most volatile (boom/bust + injury-driven). Heuristic.
-POSITION_CV: dict[str, float] = {
+#: The fitted artifact this module reads at import. Written by ``scripts/eval_distributions.py``; the
+#: sims read it here so it is a *source*, not a write-only record (spec Decision #9 item 4).
+FITTED_ARTIFACT_PATH = Path(__file__).resolve().parents[1] / "model" / "fit" / "distributions.json"
+
+#: Heuristic **fallbacks**, retained verbatim from the v1 hand-picked knobs. These are what a position
+#: falls back to when the fit is missing or undecided — never edited to a fitted value, so the fallback
+#: path stays honest and the artifact remains the single source of the fitted numbers.
+HEURISTIC_POSITION_CV: dict[str, float] = {
     "QB": 0.18,
     "RB": 0.32,
     "WR": 0.30,
@@ -37,11 +70,7 @@ POSITION_CV: dict[str, float] = {
 }
 DEFAULT_CV = 0.30
 
-#: Coefficient of variation of a SINGLE GAME's fantasy points, by position (std ÷ mean of one week).
-#: Much larger than the season CV per week-slice would suggest naively — but far smaller than the
-#: independence-derived ``season CV × √17``, which over-skews one game (a 12-pt WR's median ≈ 7).
-#: Shared by the win-probability model and the season sim so the two stay consistent.
-GAME_CV: dict[str, float] = {
+HEURISTIC_GAME_CV: dict[str, float] = {
     "QB": 0.45,
     "RB": 0.60,
     "WR": 0.70,
@@ -51,9 +80,7 @@ GAME_CV: dict[str, float] = {
 }
 DEFAULT_GAME_CV = 0.65
 
-#: (P(a significant multi-week setback in a season), mean games missed when it occurs), by position.
-#: RBs get hurt most and miss the most time; K/DEF are nearly never the reason you lose a week.
-INJURY_RISK: dict[str, tuple[float, float]] = {
+HEURISTIC_INJURY_RISK: dict[str, tuple[float, float]] = {
     "QB": (0.25, 3.0),
     "RB": (0.45, 4.0),
     "WR": (0.35, 3.0),
@@ -64,6 +91,155 @@ INJURY_RISK: dict[str, tuple[float, float]] = {
 DEFAULT_RISK = (0.30, 3.0)
 
 
+# --------------------------------------------------------------------------- the fitted-over-heuristic merge
+def _read_artifact(path: str | Path) -> dict:
+    """The fitted artifact as a dict, or ``{}`` if it is missing or unreadable (fail-safe, never raise).
+
+    Import must not fall over on a fresh checkout that has not run ``eval_distributions`` yet, so any
+    read/parse failure degrades to "no fitted values" — every position then takes its heuristic.
+    """
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _merge_scalar(artifact: Mapping, knob_key: str, heuristic: Mapping[str, float]) -> dict[str, float]:
+    """Fitted-over-heuristic for a scalar CV knob: use the fit only where its verdict is ``fitted``.
+
+    Starts from a copy of ``heuristic`` (so **all** positions are present) and overrides a position only
+    when the artifact records a ``fitted`` verdict with a finite positive value. A ``heuristic-fallback``
+    cell, an absent cell, or a malformed value all leave that position on its heuristic.
+    """
+    out = dict(heuristic)
+    cells = artifact.get(knob_key)
+    if not isinstance(cells, Mapping):
+        return out
+    for pos in heuristic:
+        cell = cells.get(pos)
+        if isinstance(cell, Mapping) and cell.get("verdict") == "fitted":
+            value = cell.get("value")
+            if isinstance(value, (int, float)) and np.isfinite(value) and value > 0:
+                out[pos] = float(value)
+    return out
+
+
+def _merge_injury(
+    artifact: Mapping, heuristic: Mapping[str, tuple[float, float]]
+) -> dict[str, tuple[float, float]]:
+    """Fitted-over-heuristic for ``INJURY_RISK``: a fitted cell supplies ``(p_setback, mean_games)``."""
+    out = {pos: (float(p), float(g)) for pos, (p, g) in heuristic.items()}
+    cells = artifact.get("injury_risk")
+    if not isinstance(cells, Mapping):
+        return out
+    for pos in heuristic:
+        cell = cells.get(pos)
+        if isinstance(cell, Mapping) and cell.get("verdict") == "fitted":
+            p, g = cell.get("p"), cell.get("games")
+            if (
+                isinstance(p, (int, float))
+                and isinstance(g, (int, float))
+                and np.isfinite(p)
+                and np.isfinite(g)
+                and 0.0 <= p <= 1.0
+                and g > 0.0
+            ):
+                out[pos] = (float(p), float(g))
+    return out
+
+
+_ARTIFACT = _read_artifact(FITTED_ARTIFACT_PATH)
+
+#: Coefficient of variation (std / mean) of season fantasy points, by position — fitted where the
+#: artifact decided it, heuristic elsewhere (see the module docstring). QB/K are the most predictable;
+#: TE/RB the most volatile.
+POSITION_CV: dict[str, float] = _merge_scalar(_ARTIFACT, "position_cv", HEURISTIC_POSITION_CV)
+
+#: Coefficient of variation of a SINGLE GAME's fantasy points, by position — fitted from the weekly
+#: models' out-of-sample residuals, heuristic elsewhere. Far larger than the season CV per week-slice
+#: would suggest, but far smaller than the independence-derived ``season CV × √17`` (which over-skews
+#: one game). Shared by the win-probability model and the season sim so the three stay consistent.
+GAME_CV: dict[str, float] = _merge_scalar(_ARTIFACT, "game_cv", HEURISTIC_GAME_CV)
+
+#: (P(a significant multi-week setback in a season), mean games missed when it occurs), by position —
+#: fitted from ``nflverse_injuries`` "Out" runs, heuristic where a position cannot be separated cleanly
+#: (DST is never on the injury report). RBs get hurt most and miss the most time.
+INJURY_RISK: dict[str, tuple[float, float]] = _merge_injury(_ARTIFACT, HEURISTIC_INJURY_RISK)
+
+
+def _knob_sources(artifact: Mapping) -> dict[str, dict[str, str]]:
+    """Per-knob, per-position ``"fitted"`` / ``"heuristic"`` — what the sims' reports mark as judgeable."""
+    out: dict[str, dict[str, str]] = {}
+    for knob in ("position_cv", "game_cv", "injury_risk"):
+        cells = artifact.get(knob)
+        out[knob] = {}
+        for pos in HEURISTIC_POSITION_CV:
+            cell = cells.get(pos) if isinstance(cells, Mapping) else None
+            out[knob][pos] = "fitted" if isinstance(cell, Mapping) and cell.get("verdict") == "fitted" else "heuristic"
+    return out
+
+
+#: ``{knob: {position: "fitted"|"heuristic"}}`` — read by both sims' reports so a fallback value is
+#: shown as a fallback (a trailing ``*``), keeping every knob judgeable (spec Decision #9 / ticket #32).
+KNOB_SOURCES: dict[str, dict[str, str]] = _knob_sources(_ARTIFACT)
+
+
+def is_fitted(knob: str, position: str) -> bool:
+    """Did ``position``'s ``knob`` (``"position_cv"`` / ``"game_cv"`` / ``"injury_risk"``) ship fitted?"""
+    return KNOB_SOURCES.get(knob, {}).get(position) == "fitted"
+
+
+# --------------------------------------------------------------------------- runtime knob swap
+def _apply_inplace(target: dict, new: Mapping | None) -> None:
+    """Replace ``target``'s contents with ``new`` **in place** (``clear``/``update``), or leave it be.
+
+    In place, never a rebind, and that is load-bearing — see :func:`use_knobs`.
+    """
+    if new is None:
+        return
+    target.clear()
+    target.update(new)
+
+
+@contextmanager
+def use_knobs(
+    *,
+    position_cv: Mapping[str, float] | None = None,
+    game_cv: Mapping[str, float] | None = None,
+    injury_risk: Mapping[str, tuple[float, float]] | None = None,
+) -> Iterator[None]:
+    """Temporarily replace the module knob dicts **in place**, restoring them on exit.
+
+    Used by the before/after harness (``scripts/eval_distributions.py``) to run the sim under heuristic
+    vs fitted knobs, and by the tests. A knob left ``None`` is untouched, so the four before/after arms
+    are composed by passing exactly the dicts that arm should use.
+
+    **The mutation must be in place, and this is why it is not merely a style choice.** Two other
+    surfaces bind to these dict *objects* at import:
+
+    * ``optimizer.winprob.WEEKLY_CV = GAME_CV`` — a name bound to the object, and
+    * ``seasonsim.engine`` reads ``distributions.POSITION_CV.get(...)`` — an attribute lookup at call time,
+      on the object ``seasonsim.distributions`` re-exported (the same object, by import binding).
+
+    Rebinding ``draftsim.distributions.GAME_CV = {...}`` would leave ``winprob.WEEKLY_CV`` pointing at
+    the *old* dict while ``seasonsim`` follows the *new* one — the two surfaces would silently disagree
+    and nothing would error. Mutating the one shared object in place keeps all three consistent, which a
+    test (``test_use_knobs_is_seen_by_winprob``) pins.
+    """
+    saved = (dict(POSITION_CV), dict(GAME_CV), dict(INJURY_RISK))
+    _apply_inplace(POSITION_CV, position_cv)
+    _apply_inplace(GAME_CV, game_cv)
+    _apply_inplace(INJURY_RISK, injury_risk)
+    try:
+        yield
+    finally:
+        _apply_inplace(POSITION_CV, saved[0])
+        _apply_inplace(GAME_CV, saved[1])
+        _apply_inplace(INJURY_RISK, saved[2])
+
+
+# --------------------------------------------------------------------------- samplers (unchanged)
 def lognormal_params(mean: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """``(mu, sigma)`` of the underlying normal so the lognormal has this ``mean`` and ``cv``.
 

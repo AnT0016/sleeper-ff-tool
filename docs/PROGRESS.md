@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **5 of 8 shipped:**
+Tickets — **6 of 8 shipped:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
@@ -646,9 +646,59 @@ Tickets — **5 of 8 shipped:**
       every-year cohort (17-25% of fantasy rows per season): null prior features, an `is_rookie` flag,
       predicted at the position's learned level. Output feeds `draft.vor` in the exact `PlayerRow` shape
       `build_board` produces, so tiers/VOR are reused; no consumer is wired to it (that is #34).
-- [ ] **#32 fit the sims' distributions** — earns the `POSITION_CV` / `GAME_CV` / `INJURY_RISK` knobs in
-      [draftsim/distributions.py](../src/draftsim/distributions.py) that are currently labelled
-      "heuristic, *not* fitted"; fitted values as a data artifact, heuristics kept as fallback.
+- [x] **#32 fit the sims' distributions** — [src/model/distributions.py](../src/model/distributions.py)
+      (the fitting logic) + [scripts/eval_distributions.py](../scripts/eval_distributions.py) →
+      [docs/model-distributions.md](model-distributions.md) (the measured report) +
+      [src/model/fit/distributions.json](../src/model/fit/distributions.json) (the committed, regenerable
+      artifact) + [draftsim/distributions.py](../src/draftsim/distributions.py) (reads it at import,
+      fitted-over-heuristic per position) + tests. Earns `POSITION_CV` / `GAME_CV` / `INJURY_RISK` — the
+      knobs `seasonsim` re-exports and `optimizer/winprob` binds — from the shipped models' **walk-forward
+      out-of-sample residuals** (never raw actuals: the sims want the CV of `actual | projection`, not the
+      cross-player dispersion). `CV = std(actual/pred)/mean(actual/pred)`, fit **per season then averaged**
+      so a per-season level drift (2021, the first 17-game year, predicted by a 16-game-only train set)
+      stays out of the pooled dispersion (measured, §B/§C — era-robustness shown, not asserted). Measured
+      on the real lake (169,685 rows, **zero warnings**): **16 of 18 (position × knob) cells fitted, 2
+      fall back** (RB season CV, DEF injury). Game CV all six (0.60-0.87, weekly residuals are
+      played-weeks-only so already availability-conditioned). **Season CV — the cohort, then the coherence
+      gate:** the season CV is fit on the **drafted cohort** — the per-season top-N by projection this
+      league rosters (QB 24 / RB 48 / WR 60 / TE 18 / K 12 / DEF 12, from the locked 12×14 roster), **not**
+      a projection-value floor. Fitting over the wider ~367/season pool measures the volatile fringe
+      (backup QBs, RB3s) the sim never drafts, which is what inflated the pooled CV (the tercile slide). On
+      the drafted cohort the **season-factor coherence gate** (the sim's own `season_factor_cv` identity,
+      trap 2, at both ends) fits **5 of 6** (QB/WR/TE/K/DEF) and defers RB (implied factor 0.56 > 0.5);
+      the ~367-wide CV is recorded as the upper bound (§A). **Cohort-sensitive at the margin, stated:** the
+      alternative structural cut (top-168 overall) defers QB instead — 5/6 either way, which position fails
+      depends on the cut (§E robustness). Ownership (trap 4): INJURY_RISK owns games-missed, and the
+      healthy-vs-full near-equality confirms the season CV barely double-counts it. **Injury — the IR
+      dropout (Amendment B) + the drafted cohort (Amendment C):** a season-ending injury moves to IR and
+      drops off the weekly report (only ~35% of season-enders keep any `Out` row), so a contiguous-`Out`-run
+      definition undercounts the most severe injuries 5-7×. Refit as a **corroborated absence** — a ≥ 2-week
+      gap in played weeks (tenure-bounded) carrying an injury-report status at/just-before its start —
+      catching the IR case while excluding byes and clean cuts, **on the same drafted cohort as the season
+      CV** (the loose qualified pool inverted TE above RB — fixing the cohort resolves it): fitted P(setback)
+      QB 33% / RB 41% / WR 41% / TE 36% / K 17% (five, ordering RB ≈ WR > TE > QB > K; **DEF falls back —
+      never on the injury report**), back in the domain-heuristic range vs the IR-truncated 10-18% and the
+      loose-pool rate both shown alongside. **Two thresholds moved as consequences of the cohort decision,
+      stated in one place (§Findings 6):** `MIN_CV_N` 100→40 flipped K/DEF season CV fallback→fitted;
+      `MIN_INJURY_SEASONS` 200→50 keeps QB/TE/K injury fitted (drafted n's 178/140/94) — the cohorts are
+      small by construction, so a wide-pool floor was the wrong instrument; both re-derived on structure,
+      verdict-affecting, and reported so the reader judges the pattern. **Amendment 1 (mean double-count):**
+      the availability haircut lands on a projection that already embeds average injury loss; **exposed**
+      (per-position `E[avail]` heuristic-vs-fitted, §D) via a **four-arm** before/after (heuristic · CV-only ·
+      injury-only · both) that decomposes the move — **not** re-centred (out of scope). Before/after on one
+      fixed synthetic 12-team league (seed-pinned, common random numbers, my_edge): **16.8% → 15.3%** (Δ −1.5
+      pts), decomposed CV −1.45 / injury −0.85 — fitting the (upper-bound) CVs adds realistic season noise
+      that slightly lowers a favourite's title odds; recorded either way. **Safe by default** (missing
+      artifact → every position heuristic; a fallback never leaks or `{}`-empties); the artifact is **read
+      back** by the sims (no write-only record) and regenerates **byte-identical**; the reports still print
+      every knob with a `*` on fallbacks (draftsim/seasonsim [report.py](../src/draftsim/report.py)). The
+      `use_knobs` runtime swap **mutates in place** (a rebind would leave `winprob.WEEKLY_CV` on the old
+      dict while `seasonsim` followed the new — pinned by `test_use_knobs_is_seen_by_winprob`). Tests:
+      [tests/test_model_distributions.py](../tests/test_model_distributions.py) (26 offline — read path,
+      in-place swap across all three surfaces, residual-CV/cohort/injury estimators, corroborated-setback
+      IR-dropout, drafted-cohort injury vs wide, the coherence gate + the identity on the shipped knobs,
+      render-prose-follows-tables); four guards revert-checked (each mutant caught by its named test). Full
+      suite **809 passed**; `ruff` clean.
 - [ ] **#33 breakout / waiver classifier** — the one model whose *label* is deliberately in the future
       while its *features* stay strictly pre-lock; that asymmetry is pinned by a test.
 - [ ] **#34 projection-source seam + swap gate** — one seam, defaulting to Sleeper, with every existing

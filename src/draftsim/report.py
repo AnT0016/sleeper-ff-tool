@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from .bots import ADP_NOISE, BOT_MAX_PER_POS, LATE_ROUND_FRACTION
-from .distributions import INJURY_RISK, POSITION_CV, SEASON_GAMES
+from .distributions import INJURY_RISK, POSITION_CV, SEASON_GAMES, is_fitted
 from .engine import SimOutput, StrategyResult, representative_draft
 from .lineup import select_starters
 
@@ -30,15 +30,17 @@ def _pct(x: float) -> str:
 
 
 def assumptions_block(out: SimOutput, slot_source: str) -> str:
-    cv = " ".join(f"{p} {POSITION_CV[p]:.2f}" for p in ("QB", "RB", "WR", "TE", "K", "DEF"))
+    _pos = ("QB", "RB", "WR", "TE", "K", "DEF")
+    cv = " ".join(f"{p} {POSITION_CV[p]:.2f}{'' if is_fitted('position_cv', p) else '*'}" for p in _pos)
     inj = " ".join(
-        f"{p} {INJURY_RISK[p][0]:.0%}/{INJURY_RISK[p][1]:.0f}g"
-        for p in ("QB", "RB", "WR", "TE", "K", "DEF")
+        f"{p} {INJURY_RISK[p][0]:.0%}/{INJURY_RISK[p][1]:.0f}g{'' if is_fitted('injury_risk', p) else '*'}"
+        for p in _pos
     )
     caps = " ".join(f"{p}≤{n}" for p, n in BOT_MAX_PER_POS.items())
     late = int(out.cfg.rounds * LATE_ROUND_FRACTION)
     lines = [
-        "ASSUMPTIONS (directional & heuristic — NOT fitted to data; tune in src/draftsim/):",
+        "ASSUMPTIONS (fitted from the lake where coherent, else heuristic fallback marked * — "
+        "src/model/fit/distributions.json, docs/model-distributions.md):",
         "  • Outcomes: season points ~ lognormal, mean = our custom-scored projection.",
         f"      CV (std/mean) by pos: {cv}",
         f"  • Injuries: P(significant setback)/season & mean games missed (of {SEASON_GAMES}):",
