@@ -6,7 +6,10 @@ to knock a player out of specific weeks so the bench actually gets tested. This 
 draws, reusing :mod:`draftsim.distributions`' per-position knobs (CV and injury risk) so the two
 simulators stay consistent.
 
-ASSUMPTIONS (heuristic, *not* fitted — printed in the report so they can be judged):
+The per-position knobs (``POSITION_CV``, ``GAME_CV``, ``INJURY_RISK``) are re-exported from
+:mod:`draftsim.distributions`, where they are now **fitted** from the lake with a heuristic fallback
+(ticket #32) — so both simulators improve at once. The report still prints every knob (and marks any
+position that fell back to its heuristic) so they stay judgeable. The mechanics below are unchanged:
 
 * **A player's week = per-season factor × single-game draw.** The single-game draw is lognormal at
   the shared per-position ``GAME_CV`` (the same realistic one-week noise the win-probability model
@@ -36,6 +39,7 @@ from draftsim.distributions import (  # noqa: F401  (re-exported for the report)
     INJURY_RISK,
     POSITION_CV,
     SEASON_GAMES,
+    is_fitted,
     lognormal_params,
 )
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .distributions import GAME_CV, INJURY_RISK, POSITION_CV, SEASON_GAMES
+from .distributions import GAME_CV, INJURY_RISK, POSITION_CV, SEASON_GAMES, is_fitted
 from .engine import SeasonSimOutput
 from .inputs import SeasonInputs
 
@@ -25,11 +25,15 @@ def _pct(x: float) -> str:
 
 
 def assumptions_block(out: SeasonSimOutput, inp: SeasonInputs) -> str:
-    cv = " ".join(f"{p} {POSITION_CV[p]:.2f}" for p in _POS)
-    gcv = " ".join(f"{p} {GAME_CV[p]:.2f}" for p in _POS)
-    inj = " ".join(f"{p} {INJURY_RISK[p][0]:.0%}/{INJURY_RISK[p][1]:.0f}g" for p in _POS)
+    cv = " ".join(f"{p} {POSITION_CV[p]:.2f}{'' if is_fitted('position_cv', p) else '*'}" for p in _POS)
+    gcv = " ".join(f"{p} {GAME_CV[p]:.2f}{'' if is_fitted('game_cv', p) else '*'}" for p in _POS)
+    inj = " ".join(
+        f"{p} {INJURY_RISK[p][0]:.0%}/{INJURY_RISK[p][1]:.0f}g{'' if is_fitted('injury_risk', p) else '*'}"
+        for p in _POS
+    )
     lines = [
-        "ASSUMPTIONS (directional & heuristic — NOT fitted to data; tune in src/seasonsim/):",
+        "ASSUMPTIONS (fitted from the lake where coherent, else heuristic fallback marked * — "
+        "src/model/fit/distributions.json, docs/model-distributions.md):",
         "  • Outcomes: each week = single-game lognormal (realistic one-week noise, shared with the",
         "      win-prob model) × a per-season factor sized so season totals keep the season CV.",
         f"      Game CV by pos: {gcv}.  Season CV by pos: {cv}",
