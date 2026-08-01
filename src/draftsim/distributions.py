@@ -31,10 +31,14 @@ so a position the fit could not decide keeps its heuristic. Where each number ca
   game grain. Shared with the win-probability model and the season sim so all three stay consistent.
 * **Injuries** are one *significant* multi-week "setback" per season: a Bernoulli per position; if it
   fires, games missed ~ Poisson(severity) clipped to ``[1, SEASON_GAMES]``. The availability multiplier
-  ``(games_played / SEASON_GAMES)`` scales the sampled season total. :data:`INJURY_RISK` is fitted from
-  contiguous ``report_status == "Out"`` runs (≥ 2 weeks) in ``nflverse_injuries`` over a tenure-bounded
-  denominator; **DST is never on the injury report, so it keeps the heuristic** (and any position too
-  thin to fit does too — that is what the fallback is for).
+  ``(games_played / SEASON_GAMES)`` scales the sampled season total. :data:`INJURY_RISK` is fitted on the
+  same **drafted cohort** as the season CV, from a contiguous **injury absence** of ≥ 2 weeks — a gap in
+  a player's *played* weeks, tenure-bounded and injury-corroborated by the weekly report (which excludes
+  byes and clean benchings). Not from ``report_status == "Out"`` runs: a player on IR drops off the
+  weekly report, so a season-ending injury leaves no ``Out`` weeks at all and an Out-only read undercounts
+  the rate several-fold, exactly on the severe injuries this knob exists to model.
+  **DST is never on the injury report, so it keeps the heuristic** (and any position too thin to fit does
+  too — that is what the fallback is for).
 
 Safe by default (spec Decision #9). A missing or unreadable artifact → **every** position falls back to
 its heuristic; a position marked ``heuristic-fallback`` in the artifact → that position falls back. The
@@ -163,8 +167,10 @@ POSITION_CV: dict[str, float] = _merge_scalar(_ARTIFACT, "position_cv", HEURISTI
 GAME_CV: dict[str, float] = _merge_scalar(_ARTIFACT, "game_cv", HEURISTIC_GAME_CV)
 
 #: (P(a significant multi-week setback in a season), mean games missed when it occurs), by position —
-#: fitted from ``nflverse_injuries`` "Out" runs, heuristic where a position cannot be separated cleanly
-#: (DST is never on the injury report). RBs get hurt most and miss the most time.
+#: fitted from injury-corroborated multi-week absences on the drafted cohort, heuristic where a position
+#: cannot be separated cleanly (DST is never on the injury report). RB and WR carry the most risk, then
+#: TE, then QB; K is an order of magnitude safer. ``mean games missed`` includes season-enders, so it
+#: runs above the heuristic's return-from-injury figure.
 INJURY_RISK: dict[str, tuple[float, float]] = _merge_injury(_ARTIFACT, HEURISTIC_INJURY_RISK)
 
 

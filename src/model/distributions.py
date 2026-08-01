@@ -15,17 +15,30 @@ cannot condition on a historical projection (``baseline_sleeper_points`` is null
 so the honest route is the models this phase already shipped, fit from their **walk-forward
 out-of-sample** residuals ``r = actual / pred``:
 
-* :data:`POSITION_CV` ← :class:`model.season.SeasonModel` season-grain residuals, on the **setback-free
-  (healthy)** player-seasons. The injury knob owns games-missed variance, so the season CV must not also
-  absorb it; the healthy read is what the sim always meant this knob to be (the spread of a player who
-  stayed on the field). The full-cohort CV is reported alongside so the removed tail is visible.
+* :data:`POSITION_CV` ← :class:`model.season.SeasonModel` season-grain residuals on the **drafted
+  cohort** (:data:`SEASON_COHORT_BY_POSITION` — the per-season top-N by projection this league rosters,
+  from the locked 12 x 14 roster), **setback-free (healthy)**. Both cuts are load-bearing. The *drafted*
+  cut, because a knob fit over the wider fringe measures volatile backups the sim never drafts: on the
+  ~367/season pool the residual CVs run 0.53-1.07 at the five skill positions (recorded in the artifact
+  as ``upper_bound_position_cv``) and fail the coherence gate at 5 of 6; on the 168/season drafted pool
+  they run 0.24-0.61 and
+  pass at 5 of 6 — the verdict inverts on the cohort alone. The *healthy* cut, because the injury
+  knob owns games-missed variance and the two must not double-count. The wide-cohort CV is reported as
+  an upper bound and the full (setback-inclusive) CV alongside it, so both removed tails stay visible.
 * :data:`GAME_CV` (QB/RB/WR/TE) ← :class:`model.weekly.WeeklyModel` residuals; (K/DEF) ←
   :class:`model.kickdef.KickDefModel` residuals. A week a player did not play has **no stat-line row**
   (the #29 finding), so weekly residuals are already conditioned on availability — no healthy filter is
   needed or applied at game grain.
-* :data:`INJURY_RISK` ← contiguous ``report_status == "Out"`` runs in ``nflverse_injuries`` over a
-  **tenure-bounded denominator** (a real opportunity to play). DST is never on the injury report, so it
-  falls back to the heuristic; any position too thin to fit does too.
+* :data:`INJURY_RISK` ← a contiguous **injury absence** of ≥ :data:`SETBACK_MIN_WEEKS` weeks — a gap in
+  a player's *played* weeks, **tenure-bounded** (a real opportunity to play, so pre-arrival absence is
+  not injury) and **injury-corroborated** (the player carries an injury-report status in the run or the
+  week it began, which excludes byes and clean benchings). Fit on the same **drafted cohort** as the
+  season CV, for the same reason. Emphatically **not** contiguous ``report_status == "Out"`` runs, which
+  was the first attempt and is wrong: a player placed on IR drops off the weekly report entirely, so a
+  season-ending injury produces *zero* ``Out`` weeks. Measured, only ~35% of season-enders keep any
+  ``Out`` row, and the Out-only rate undercounts by 2.5-4x — precisely on the severe injuries the knob
+  exists to model. The Out-only rate is kept in the report as the IR-truncated lower bound. DST is never
+  on the injury report, so it falls back to the heuristic; any position too thin to fit does too.
 
 Estimator. ``CV = std(r) / mean(r)`` — matches the sim's mean-preserving lognormal exactly, is
 scale-free across heterogeneous projections, and tolerates the real weekly zeros a log-space estimator
@@ -36,9 +49,18 @@ out of the pooled *dispersion*. ``mean(r)`` and ``CV(r)`` are reported by season
 by prediction tercile (to record whether CV slides with the projection — the sim takes one constant
 either way).
 
-Thresholds are declared **before** measuring (the anti-pattern spec Decision #3 exists to prevent),
-on principled grounds, and reported: a CV from too few residuals, or an injury rate from too few
-player-seasons, is noise, so those cells defer to the heuristic.
+Thresholds, honestly. The cohorts and the coherence *principle* were declared **before** measuring (the
+anti-pattern spec Decision #3 exists to prevent); two floors were not, and the report says so rather
+than burying it. Re-cutting to the drafted roster makes the per-position cohorts small **by
+construction** (12-60 players/season), so floors sized for the old wide pools were the wrong instrument
+and were re-derived on the cohort structure: :data:`MIN_CV_N` 100→40 (flipped **K and DEF** season CV
+from fallback to fitted) and :data:`MIN_INJURY_SEASONS` 200→50 (keeps **QB, TE, K** injury fitted, whose
+drafted-cohort n's are 178/140/94). Both are **verdict-affecting**, for a legitimate reason, and neither
+is tuned to a verdict — the coherence gate and injury coverage still decide. Likewise
+:data:`MAX_SEASON_FACTOR_CV`: the principle (a >50% whole-season baseline swing is projection error, not
+outcome uncertainty) is pre-data, but the exact 0.5 was chosen after seeing the factors; the split is
+robust anywhere in ~[0.44, 0.55]. All of it is in the report so the pattern is judgeable, not
+discoverable.
 """
 
 from __future__ import annotations
