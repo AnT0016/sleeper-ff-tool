@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Project: Sleeper Fantasy Football Tool.** Persistent project context. Read at the start of every session. Keep edits high-signal; this is a behavioral contract, not documentation.
 
 ## Repo status & commands
-Python 3.11+, `src/` layout. **Phases 1–8 are DONE** — Phase 8 shipped the point-in-time data foundation (the lake + `build_training_frame`; its prelock cron gets its first live proof the Thursday before Week 1). **Phase 9 (in-house models over the lake) is IN PROGRESS** — spec: [docs/plans/modeling.md](docs/plans/modeling.md), tickets #27–#34. See [docs/PROGRESS.md](docs/PROGRESS.md) for per-phase status. One-time setup: `python -m venv .venv` then `./.venv/Scripts/python -m pip install -e ".[dev]"`.
+Python 3.11+, `src/` layout. **Phases 1–9 are DONE** — Phase 8 shipped the point-in-time data foundation (the lake + `build_training_frame`; its prelock cron gets its first live proof the Thursday before Week 1). **Phase 9 (in-house models over the lake) is DONE** — the weekly, K/DST and draft-value models are built, graded, and now a **selectable** projection source (default Sleeper) behind the live swap gate, which reads zero live weeks today so every surface stays on Sleeper until a model clears the forward bar from 2026 W1 (spec: [docs/plans/modeling.md](docs/plans/modeling.md), tickets #27–#34). See [docs/PROGRESS.md](docs/PROGRESS.md) for per-phase status. One-time setup: `python -m venv .venv` then `./.venv/Scripts/python -m pip install -e ".[dev]"`.
 
 - Run tests (offline): `./.venv/Scripts/python -m pytest -q`
 - Custom-scoring season validation (network, cached): `./.venv/Scripts/python scripts/validate_custom.py`
@@ -75,7 +75,7 @@ Phase 8 stands up a **point-in-time, lookahead-free** historical dataset ("the l
 - **`sleeper_proj_*` are forward-only** (start 2026 W1; the endpoints serve only the latest values); everything else is backfillable. `content_known` ≠ `cadence`.
 - **[`src/collect/registry.py`](src/collect/registry.py) is the authoritative source table** (pinned by `tests/test_registry.py`); the crons' contract is held by [`tests/test_workflows.py`](tests/test_workflows.py). Add a source with one registry entry + a collector — never a change to the store.
 
-## Modeling (Phase 9, in progress)
+## Modeling (Phase 9, done — models selectable behind the live swap gate)
 In-house models over `build_training_frame`. Full spec: **[docs/plans/modeling.md](docs/plans/modeling.md)** (tickets #27–#34). Non-negotiables when touching any model code:
 - **Evaluation before models.** `baseline_sleeper_points` is **null for all of 2016–2025** — Sleeper's projections are forward-only, so "beat the market" is measurable only from 2026 W1 onward. The historical bar is the three naive baselines in `src/model/baselines.py` (#28), and it is recorded before any model is fit.
 - **Models predict stats; [`scoring.engine`](src/scoring/engine.py) scores them.** Wherever a target decomposes into components — K and DST unambiguously — never a points-valued regression head. Keeps "never hand-code scoring" true through the model layer, and re-prices predictions with no retraining if scoring changes.

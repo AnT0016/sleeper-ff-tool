@@ -17,6 +17,17 @@ Pieces (all reused from earlier phases where possible):
 * usage signals (``waivers.usage``) for the candidate set.
 
 Every candidate that fails an ID join is logged per the CLAUDE.md rule.
+
+Mixed-source boundary (Phase 9, #34)
+------------------------------------
+This module's **weekly** projections (this week and next week) route through the projection-source seam
+(:func:`projections.source.weekly_projections`), so they follow the recorded swap gate — Sleeper by
+default, our model per position once it clears the live bar. The **season** projections that feed the
+stash baselines (:func:`sleeper.client.get_season_projections`, below) deliberately stay on Sleeper —
+they are outside #34's enumerated seam sites. So one waiver run can score this-week streamers from the
+model while its stash baselines come from Sleeper, and stash-vs-start advice compares across the two.
+That boundary is intentional and scoped, not an oversight; the seam is shaped so routing the season call
+through it later is a one-line change (``season_board`` / a season-scored variant), not a second pattern.
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ from optimizer.inputs import (
     score_projections,
 )
 from optimizer.lineup import LineupPlayer, lineup_slots, optimize
+from projections.source import weekly_projections
 from scoring.engine import points
 from sleeper import client
 from waivers.handcuffs import find_handcuffs
@@ -230,8 +242,14 @@ def load_waiver_inputs(
     *,
     sleeper=client,
     enrich_usage: bool = True,
+    source: str | None = None,
 ) -> WaiverInputs:
-    """Fetch + join everything the waiver views need for one week (live, cached). Read-only."""
+    """Fetch + join everything the waiver views need for one week (live, cached). Read-only.
+
+    ``source`` selects the **weekly** projection source (this week + next week) via the #34 seam —
+    ``None`` (default) is Sleeper per the recorded swap gate. The season-projection stash baselines stay
+    on Sleeper (the documented mixed-source boundary in the module docstring).
+    """
     league = sleeper.get_league(league_id)
     scoring = league["scoring_settings"]
     slots = lineup_slots(league.get("roster_positions") or [])
@@ -239,7 +257,7 @@ def load_waiver_inputs(
     rosters = sleeper.get_rosters(league_id)
     roster = find_my_roster(rosters, user_id)
     players_map = sleeper.get_players_nfl()
-    scored = score_projections(sleeper.get_projections(season, week), scoring)
+    scored = weekly_projections(season, week, scoring, source=source, sleeper=sleeper)
     byes = bye_teams(season, week)
 
     # My roster -> my optimal lineup -> my starters.
@@ -341,7 +359,7 @@ def load_waiver_inputs(
 
     # K/DEF streaming horizons: this week + next week (real weekly projections), a rest-of-season
     # per-game level (season projection ÷ games), and a Weeks 15-17 outlook (DEF SOS-tilted, K flat).
-    next_scored = score_projections(sleeper.get_projections(season, week + 1), scoring)
+    next_scored = weekly_projections(season, week + 1, scoring, source=source, sleeper=sleeper)
     stream_candidates = _stream_candidates(
         scored, next_scored, season_scored, fa_ids, players_map, sos, opp_by_week
     )

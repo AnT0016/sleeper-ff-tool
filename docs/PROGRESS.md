@@ -499,7 +499,7 @@ concrete, gradeable offers.
       values roster quality by season projection — it doesn't model positional scarcity beyond the
       lineup or a partner's willingness.
 
-## Phase 9 — In-house models over the lake `[ ]` IN PROGRESS
+## Phase 9 — In-house models over the lake `[x]` DONE
 Replaces Sleeper's projections as this tool's source of player value with **our own models**, trained on
 the Phase 8 lake and graded honestly. The edge being chased is not "a better generic projection" — it is
 the three places a generic projection is *structurally* wrong for this league: **half-PPR with 4-point
@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **7 of 8 shipped:**
+Tickets — **8 of 8 shipped — phase complete:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
@@ -754,8 +754,51 @@ Tickets — **7 of 8 shipped:**
       baseline exactly, `load_fitted` round-trip, safe-by-default, render-prose-follows-tables); the two
       asymmetry mutants + the window-cap/every-k-gate/deferral/safe-default guards each revert-checked.
       Full suite **829 passed**; `ruff` clean.
-- [ ] **#34 projection-source seam + swap gate** — one seam, defaulting to Sleeper, with every existing
-      test passing untouched; the live model-vs-Sleeper scoreboard from 2026 W1.
+- [x] **#34 projection-source seam + swap gate** — [src/projections/source.py](../src/projections/source.py)
+      (the one seam) + [scripts/eval_swap_gate.py](../scripts/eval_swap_gate.py) →
+      [docs/model-swap-gate.md](model-swap-gate.md) (the live grade) +
+      [src/model/fit/swap_gate.json](../src/model/fit/swap_gate.json) (the recorded state) + edits to
+      [board.py](../src/projections/board.py), the three weekly call sites
+      ([optimizer/inputs.py](../src/optimizer/inputs.py),
+      [waivers/inputs.py](../src/waivers/inputs.py) ×2), [kickdef.py](../src/model/kickdef.py) + tests.
+      **One seam, two grains** — weekly returns the `score_projections` dict, season returns the
+      `build_board` `PlayerRow` list — **defaulting to Sleeper per position** and matching those shapes
+      exactly, so **every existing test passes untouched** (the two sims keep calling
+      `build_board(season, scoring)` unchanged; `build_board` grew a `source` param — the alternative,
+      threading `source` into the sim loaders, would break `test_audit_fixes`' pinned 2-arg
+      `build_board` monkeypatch, which is exactly what the untouched-tests criterion is there to catch).
+      **The Sleeper default never touches the lake** (`build_training_frame` is minutes; the optimizer is
+      interactive and the draft tool polls ~3s): all `model`/`dataset`/`store` imports are lazy inside the
+      model branch, the model path memoises frames+predictions per `(grain, season, week)`, and a
+      revert-checked test monkeypatches `build_training_frame` to raise and proves the default still
+      returns. **Selectable, not default** (Decision #3): `default_source` reads the recorded per-position
+      gate — the model replaces Sleeper **only** where it beats `baseline_sleeper_points` on **both** MAE
+      and within-week ρ over **≥ 4 live 2026 weeks** — a **check, not a note**, and a deliberate human act
+      (no cron regenerates the artifact — pinned in [test_workflows.py](../tests/test_workflows.py), the
+      companion to the no-commit guard). **Fails closed on the empty scoreboard**: `baseline_sleeper_points`
+      is 0/169,685 non-null (forward-only; finding #1), so today the gate ships **0 comparable rows → all
+      six positions NOT MET on 0 live weeks**, never a vacuous pass (the empty-input fail-open caught in
+      #30, far more consequential here — a vacuous pass swaps every surface). The gate is **12 cells** (6
+      positions × {MAE, ρ}) with a week count behind each; a position swaps only on its own evidence
+      (Decision #9 item 6). **The ensemble composes without flattening its gates** — `WeeklyModel`
+      (cold-start deferral), `KickDefModel` (per-cell), `SeasonModel` (DEF) each `predict` through the
+      seam, so a deferred cell returns its baseline unchanged. **The `week + 1` waiver call degrades whole
+      to Sleeper, logged at INFO**, when next-week market features aren't posted yet (a per-row hybrid is
+      not a coherent ranking, and is a mixture the gate never measured — Decision #9 item 1). **Every
+      verdict sentence is derived from the table that could contradict it** (`_verdict(cell)` /
+      `render_report` pure over the gate state — the #32/#33 headline-vs-table defect designed out where
+      it matters most). **Opening fix carried from #30:** `KickDefModel.load_fitted(path, scoring=None)`
+      now re-prices K/DST with the **live** scoring and logs the diff — the seam the module's headline
+      claims but the shipped load path couldn't reach (three copies of one scoring dict collapsed to one
+      shared reference; revert-checked re-price test moves the mean K prediction with a bumped `fgm_50p`).
+      **Documented mixed-source boundary:** waivers' weekly projections route through the seam while its
+      season-projection stash baselines stay on Sleeper (outside #34's enumerated sites) — stated in the
+      module docstring, the seam shaped so routing it later is one line. Tests:
+      [tests/test_projection_source.py](../tests/test_projection_source.py) (43 offline — gate→default
+      resolution, the Sleeper-avoids-the-lake guard, overlay/degrade/fallback, compose+rank, the
+      four-weeks-and-both-metrics gate failing closed at 0/<4, render-prose-follows-tables, the kickdef
+      re-price + shared-scoring collapse) + the cron guard. **Phase 9 complete** — the models are built,
+      graded, and now selectable, with the only honest "beat the market" grade standing by for 2026 W1.
 
 **Deadline routing.** Only the draft path (#27 -> #28 -> #31) has a hard date, roughly five weeks out.
 Nothing here is on the critical path to a *working* season: every surface it touches already runs on

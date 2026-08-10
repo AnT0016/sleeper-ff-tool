@@ -1,0 +1,68 @@
+{
+  "generated": "2026-08-10",
+  "min_live_weeks": 4,
+  "model": "swap_gate",
+  "positions": {
+    "DEF": {
+      "market_mae": null,
+      "market_rho": null,
+      "met": false,
+      "model_mae": null,
+      "model_rho": null,
+      "n": 0,
+      "reason": "0 live week(s) < 4 required \u2014 fails closed",
+      "weeks": 0
+    },
+    "K": {
+      "market_mae": null,
+      "market_rho": null,
+      "met": false,
+      "model_mae": null,
+      "model_rho": null,
+      "n": 0,
+      "reason": "0 live week(s) < 4 required \u2014 fails closed",
+      "weeks": 0
+    },
+    "QB": {
+      "market_mae": null,
+      "market_rho": null,
+      "met": false,
+      "model_mae": null,
+      "model_rho": null,
+      "n": 0,
+      "reason": "0 live week(s) < 4 required \u2014 fails closed",
+      "weeks": 0
+    },
+    "RB": {
+      "market_mae": null,
+      "market_rho": null,
+      "met": false,
+      "model_mae": null,
+      "model_rho": null,
+      "n": 0,
+      "reason": "0 live week(s) < 4 required \u2014 fails closed",
+      "weeks": 0
+    },
+    "TE": {
+      "market_mae": null,
+      "market_rho": null,
+      "met": false,
+      "model_mae": null,
+      "model_rho": null,
+      "n": 0,
+      "reason": "0 live week(s) < 4 required \u2014 fails closed",
+      "weeks": 0
+    },
+    "WR": {
+      "market_mae": null,
+      "market_rho": null,
+      "met": false,
+      "model_mae": null,
+      "model_rho": null,
+      "n": 0,
+      "reason": "0 live week(s) < 4 required \u2014 fails closed",
+      "weeks": 0
+    }
+  },
+  "season": 2026
+}
