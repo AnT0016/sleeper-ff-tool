@@ -139,7 +139,12 @@ STARTABLE_RANK: dict[str, int] = {"RB": 30, "WR": 30, "TE": 14}
 #: defined identically across all of 2018-2025 and cannot read a season it is evaluated on.
 WARMUP_SEASONS: tuple[int, ...] = (2016, 2017)
 
-LABEL_COL = "y_breakout"
+#: This model's label column. Deliberately **not** named ``LABEL_COL``: ``model.evaluate.LABEL_COL`` is
+#: ``"y_custom_points"``, the regression label every other model in the phase predicts, and that column
+#: is this model's *input* (:data:`_POINTS_COL`), not its target. Two module-level ``LABEL_COL`` names
+#: meaning different things is a re-reading hazard in a file whose whole point is a label pointing the
+#: other way, so this one carries its own prefix.
+BREAKOUT_LABEL_COL = "y_breakout"
 _POINTS_COL = "y_custom_points"
 
 #: Ridge/L2 penalty on the standardised logistic features. Modest — enough to keep a near-collinear
@@ -244,6 +249,13 @@ def add_forward_label(
     Adds ``forward_games``, ``forward_ppg``, ``has_forward_window``, ``is_evaluable``, ``y_breakout`` and
     leaves ``frame`` otherwise untouched (a copy is returned). This is *not* routed through
     ``lookahead_ok``: that gate is for features, and reaching forward is precisely this function's job.
+
+    **Pass complete seasons.** ``W_last`` is read off ``frame`` itself (the season's greatest week
+    present), so a frame truncated mid-season — an in-progress 2026 — would take the *current* week as
+    the season end and quietly mark the last ``n`` weeks unlabelable. That is correct for training, which
+    only ever sees finished seasons, and harmless at serve time, where :meth:`BreakoutModel.predict`
+    needs features and never a label. It would be wrong for anyone labelling a live season, so it is
+    stated rather than left to be discovered.
     """
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
@@ -294,7 +306,7 @@ def add_forward_label(
     work["forward_ppg"] = ppg
     work["has_forward_window"] = has_window
     work["is_evaluable"] = evaluable
-    work[LABEL_COL] = label
+    work[BREAKOUT_LABEL_COL] = label
     return work
 
 
@@ -445,6 +457,7 @@ def _fit_logistic(
     if 0.0 < base < 1.0:
         w[0] = float(np.log(base / (1.0 - base)))
 
+    converged = False
     for _ in range(max_iter):
         p = 1.0 / (1.0 + np.exp(-np.clip(design @ w, -30.0, 30.0)))
         p = np.clip(p, 1e-6, 1.0 - 1e-6)
@@ -456,7 +469,18 @@ def _fit_logistic(
             step, *_ = np.linalg.lstsq(hess, grad, rcond=None)
         w = w - step
         if float(np.max(np.abs(step))) < tol:
+            converged = True
             break
+    if not converged:
+        # Weights from a non-converged fit ship in the committed artifact and are otherwise
+        # indistinguishable from converged ones. With alpha > 0 on standardised features this should
+        # never fire — which is exactly why it must be audible when it does, rather than a silent
+        # `max_iter` exhaustion the report would count as a clean run.
+        _LOG.warning(
+            "logistic fit did not converge in %d Newton step(s) (last step %.3g > tol %.3g, n=%d) — "
+            "the weights are whatever the last iterate held",
+            max_iter, float(np.max(np.abs(step))), tol, len(y),
+        )
 
     return _LogisticFit(
         mean=mean,
@@ -573,7 +597,7 @@ class BreakoutModel:
         return tuple(p for p in self.positions if p not in self.gate)
 
     def fit(self, frame: pd.DataFrame) -> BreakoutModel:
-        y_all = pd.to_numeric(frame[LABEL_COL], errors="coerce")
+        y_all = pd.to_numeric(frame[BREAKOUT_LABEL_COL], errors="coerce")
         pos = frame["position"].astype("string")
         self._fits = {}
         for position in self.positions:
@@ -582,7 +606,7 @@ class BreakoutModel:
             sub = frame[(pos == position) & y_all.notna()]
             if sub.empty:
                 continue
-            y = pd.to_numeric(sub[LABEL_COL], errors="coerce").to_numpy(dtype="float64")
+            y = pd.to_numeric(sub[BREAKOUT_LABEL_COL], errors="coerce").to_numpy(dtype="float64")
             self._fits[position] = _fit_logistic(_feature_matrix(sub), y, self.alpha)
         return self
 
@@ -772,7 +796,7 @@ def evaluate_breakout(
                     "week": split.test["week"].to_numpy(),
                     "position": split.test["position"].to_numpy(),
                     "score": scores.to_numpy(),
-                    "label": pd.to_numeric(split.test[LABEL_COL], errors="coerce").to_numpy(),
+                    "label": pd.to_numeric(split.test[BREAKOUT_LABEL_COL], errors="coerce").to_numpy(),
                 }
             )
         )

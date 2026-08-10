@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +33,10 @@ import pytest
 
 from model.breakout import (
     BREAKOUT_FEATURES,
+    BREAKOUT_LABEL_COL,
     BREAKOUT_POSITIONS,
     K_VALUES,
+    _fit_logistic,
     BreakoutEvalResult,
     BreakoutModel,
     BreakoutPositionMetrics,
@@ -449,3 +452,34 @@ def test_render_report_prose_follows_its_tables():
     assert "rests on **k=3/5**" in report
     # The RB drift peak->trough is stated with its seasons.
     assert "0.340" in report and "0.210" in report
+
+
+# =========================================================================== solver convergence
+def test_logistic_warns_only_when_it_fails_to_converge(caplog):
+    """A non-converged fit ships weights indistinguishable from a converged one — make it audible.
+
+    Reverting the ``converged`` flag (so ``max_iter`` exhaustion passes silently) drops the warning and
+    turns this red. The normal path must stay silent, because the report counts WARNING records and a
+    guard that cries wolf would make "zero warnings on real data" meaningless.
+    """
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(400, len(BREAKOUT_FEATURES)))
+    y = (x[:, 0] + rng.normal(0, 0.5, size=400) > 0).astype("float64")
+
+    with caplog.at_level(logging.WARNING, logger="model.breakout"):
+        _fit_logistic(x, y, 1.0)
+    assert caplog.records == []  # converges well inside max_iter -> silent
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="model.breakout"):
+        _fit_logistic(x, y, 1.0, max_iter=1)  # one Newton step cannot reach tol
+    assert len(caplog.records) == 1
+    assert "did not converge" in caplog.records[0].getMessage()
+
+
+def test_breakout_label_column_is_not_the_regression_label():
+    """This model's label is its own column; ``y_custom_points`` is its *input*, never its target."""
+    from model.evaluate import LABEL_COL as REGRESSION_LABEL_COL
+
+    assert BREAKOUT_LABEL_COL == "y_breakout"
+    assert BREAKOUT_LABEL_COL != REGRESSION_LABEL_COL
