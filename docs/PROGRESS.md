@@ -522,7 +522,7 @@ passing TDs**, **distance-based kicker scoring**, and **rich DST scoring**. Full
 Plus: **week 1 has no current-season lags** and is a real week we set a lineup for — the weekly model
 needs an explicit, separately-scored cold-start path, not a fallback discovered in production.
 
-Tickets — **6 of 8 shipped:**
+Tickets — **7 of 8 shipped:**
 - [x] **#27 profile the frame** — [scripts/profile_frame.py](../scripts/profile_frame.py) +
       [docs/model-data-profile.md](model-data-profile.md) (regenerate, never hand-edit). First
       full-scale `build_training_frame(2016..2025)`: **169,685 rows x 45 cols, 4,603 players**, and
@@ -699,8 +699,61 @@ Tickets — **6 of 8 shipped:**
       IR-dropout, drafted-cohort injury vs wide, the coherence gate + the identity on the shipped knobs,
       render-prose-follows-tables); four guards revert-checked (each mutant caught by its named test). Full
       suite **809 passed**; `ruff` clean.
-- [ ] **#33 breakout / waiver classifier** — the one model whose *label* is deliberately in the future
-      while its *features* stay strictly pre-lock; that asymmetry is pinned by a test.
+- [x] **#33 breakout / waiver classifier** — [src/model/breakout.py](../src/model/breakout.py) +
+      [scripts/eval_breakout.py](../scripts/eval_breakout.py) → [docs/model-breakout.md](model-breakout.md)
+      (the measured grade) + [src/model/fit/breakout.json](../src/model/fit/breakout.json) (the committed,
+      regenerable artifact) + tests. The one model whose **label is deliberately in the future** (did
+      role + production step up over the next **N=3** weeks) while its **features stay strictly pre-lock**;
+      that inversion is pinned by a **two-halved, revert-checked** asymmetry test — spiking the forward
+      *outcomes* flips the label (mutant caught: a label that reads week `w`), spiking the forward
+      *features* leaves the prediction bit-identical (mutant caught: a feature built from `w+1`). The label
+      is **not** routed through `dataset.assemble.lookahead_ok` (that gate is for features and is
+      untouched). **The cohort decides everything, so it is declared from waiver relevance before
+      measuring** (the #32 lesson): RB/WR/TE player-weeks below the starter snap line (`snap_pct_ewma ≤
+      0.5`) **or** with no snap history yet — structural, since this league rosters 168 of ~600 active
+      players. Measured on the real lake (169,685 rows, **zero warnings**): **41,106 decision rows** (a
+      full 3-week window ahead) → **33,236 evaluable** (≥ 2 *played* forward games — a bye is not a zero)
+      → **17,062 cohort**; the null-snap "no role yet" arm is a real ~10% (RB 10.9 / WR 10.5 / TE 11.3%).
+      **QB/K/DEF excluded** (no target/rush role trajectory; K/DEF are streamed on matchup — #30's job).
+      **N=3 defended:** a reverse-priority claim is held for weeks, so a 1-week window is noise and a
+      6-week one is not actionable and hits the playoffs. **Label = forward mean points-per-played-game ≥
+      the position's startable line** `T_pos` (RB 8.19 / WR 10.44 / TE 8.09 — the S_pos-th weekly scorer
+      for 12×2 starters + a FLEX split, **fit from the 2016-2017 warm-up only** so it never reads a scored
+      season); a **full-window cap** (`week ≤ W_last − N`) keeps the horizon constant and drops the ragged
+      season edge. **The base rate is a consequence of the threshold and is not comparable across
+      positions** (RB 0.283 / WR 0.080 / TE 0.098 — RB is **3.5× WR**: a sub-50%-snap committee back
+      clears 8.19 routinely, a WR3 rarely clears 10.44), so **lift over the base rate is reported beside
+      every raw precision** — without it RB reads as the strongest position when it is only the easiest.
+      **The ≥2-games rule drops genuine negatives, not only injuries** — 19.1% of decision rows, of which
+      only 395 carried a decision-week injury status and 7,475 were benched/depth — characterised, not
+      hidden; and the **base rate drifts, position-specifically** (RB 0.341 (2021) → 0.215 (2024), WR/TE
+      flat), so precision@k is not strictly comparable across seasons. **k comes from the league:** waivers
+      are reverse-standings priority (a single ordered claim), so the decision is **k=1**, with k=3/5 for
+      stability — never precision@50. **The bar is three naive baselines** (last week's points, snap-share
+      trend, target/rush share last); since precision@1 over 117 slates has SE≈0.04, a position is
+      **fielded only when the model beats every baseline at *every* k** (1/3/5) — a k=1 win in that band
+      is noise unless the deeper k corroborate — with paired **McNemar** on the k=1 pick as the
+      significance evidence, else it **defers to the winning baseline**. Measured walk-forward 2018-2025
+      (117 windowed slates/position): **RB and TE are fielded, WR defers to last-week's-points** — WR
+      wins at k=1 (0.162 vs 0.128) but **reverses at k=3** (0.103 < 0.104) and its k=1 edge is
+      insignificant (McNemar z=0.58), so it defers — the honest analogue of #32's RB fallback, committed
+      not hidden. **RB's own k=1 margin is also insignificant** (z=1.31 vs last-week's-points); it is
+      fielded on the strength of **k=3/5** (0.709/0.638/0.595 vs 0.651/0.554/0.494; z=+5.42 / +3.59 vs the
+      trend/share baselines), as is TE (0.308/0.182/0.154, significant at every k). A **second,
+      production-axis cohort** (`points_ewma ≤ T_pos`) *fields* WR, so WR's edge is **cohort-sensitive**
+      and the report says so rather than letting one number stand. **No ownership signal exists in
+      the lake** (no roster source) — the model ranks cohort player-weeks and the free-agent filter is a
+      **serve-time** concern (#34), not a training filter; no proxy invented. **`depth_pos_rank` excluded**
+      (0% pre-2025, ~37% in 2025 — never a required feature). **Safe by default:** `BreakoutModel()` reads
+      the recorded gate (a **missing artifact defers every position** to last-week's-points — never fields
+      an unproven logistic), `load_fitted` reads weights + gate back, the diagnostic is the explicit
+      `BreakoutModel(defer={})`; artifact regenerates **byte-identical**. Tests:
+      [tests/test_model_breakout.py](../tests/test_model_breakout.py) (20 offline — the two asymmetry
+      halves, the full-window cap, per-played-game/bye, the two cohorts, precision@k/lift math, the
+      **every-k gate** (a k=1-only rule would field WR — revert-checked), the deferral gate ranks by its
+      baseline exactly, `load_fitted` round-trip, safe-by-default, render-prose-follows-tables); the two
+      asymmetry mutants + the window-cap/every-k-gate/deferral/safe-default guards each revert-checked.
+      Full suite **829 passed**; `ruff` clean.
 - [ ] **#34 projection-source seam + swap gate** — one seam, defaulting to Sleeper, with every existing
       test passing untouched; the live model-vs-Sleeper scoreboard from 2026 W1.
 

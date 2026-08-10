@@ -1,0 +1,375 @@
+{
+  "alpha": 1.0,
+  "base_rate": {
+    "RB": 0.283011,
+    "TE": 0.097795,
+    "WR": 0.080108
+  },
+  "fits": {
+    "RB": {
+      "base_rate": 0.28301075268817205,
+      "const_mask": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "features": [
+        "snap_pct_last",
+        "snap_pct_ewma",
+        "snap_pct_trend",
+        "points_last",
+        "points_ewma",
+        "points_trend",
+        "target_share_last",
+        "target_share_ewma",
+        "rush_share_last",
+        "rush_share_ewma",
+        "exp_points_last",
+        "exp_points_ewma",
+        "games_played_prior",
+        "implied_team_total",
+        "team_spread_line",
+        "target_share_trend",
+        "rush_share_trend"
+      ],
+      "intercept": -1.1110196767772877,
+      "mean": [
+        0.25417642069550395,
+        0.25437793163918665,
+        0.0014035769828926827,
+        4.999453717754187,
+        4.939893661463266,
+        0.12429978752173047,
+        0.04858133372314092,
+        0.048854619610016366,
+        0.2173813289802431,
+        0.20941271508688938,
+        6.335450227963539,
+        6.141047079948137,
+        4.576200716845878,
+        22.67663082437276,
+        -0.03956989247311828,
+        -0.00027328588687539556,
+        -0.0015216554639990853
+      ],
+      "std_safe": [
+        0.16541164961721405,
+        0.1434866966072101,
+        0.1627434569223322,
+        5.474167261285118,
+        4.104378616889777,
+        6.588976727136398,
+        0.054041923749308045,
+        0.0428748698671185,
+        0.17688533589845104,
+        0.15287308327080892,
+        4.657987198791261,
+        3.690083209266175,
+        3.571958677148187,
+        3.691443964240641,
+        6.085785526790222,
+        0.026570981639200346,
+        0.07436461301803034
+      ],
+      "weights": [
+        0.466240945828256,
+        -0.08355774168940006,
+        -0.05318425108454669,
+        -0.016553829714069105,
+        0.3632962825022868,
+        0.04609111474284085,
+        0.09403289601334446,
+        0.24434504688159492,
+        -0.33603134989243605,
+        0.948362039187456,
+        0.12892193503127924,
+        -0.41519742632428397,
+        -0.14894038642376214,
+        0.15933165209518857,
+        -0.02162322352266838,
+        -0.20302386884652376,
+        -0.04360569383639352
+      ]
+    },
+    "TE": {
+      "base_rate": 0.09779454439930355,
+      "const_mask": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "features": [
+        "snap_pct_last",
+        "snap_pct_ewma",
+        "snap_pct_trend",
+        "points_last",
+        "points_ewma",
+        "points_trend",
+        "target_share_last",
+        "target_share_ewma",
+        "rush_share_last",
+        "rush_share_ewma",
+        "exp_points_last",
+        "exp_points_ewma",
+        "games_played_prior",
+        "implied_team_total",
+        "team_spread_line",
+        "target_share_trend",
+        "rush_share_trend"
+      ],
+      "intercept": -2.446559636986652,
+      "mean": [
+        0.32548608463591366,
+        0.33053966833792636,
+        -0.00766968325791855,
+        2.684060952380955,
+        2.7095900312903276,
+        -0.004260515603799272,
+        0.05583830168896216,
+        0.05604843090504414,
+        0.004822443936670638,
+        0.004343229762361632,
+        3.8609982253771045,
+        3.853302323725739,
+        3.5301799187463727,
+        22.643934997098086,
+        -0.12100986651189785,
+        -0.00021012921608206143,
+        0.00016516641521924404
+      ],
+      "std_safe": [
+        0.14119844764467473,
+        0.12039897041013499,
+        0.1671700828264651,
+        3.4603612864085904,
+        2.5119289054215628,
+        4.530453817136855,
+        0.0476832922321516,
+        0.03862490622785454,
+        0.02933953711338044,
+        0.02456431831844071,
+        2.817093725869629,
+        2.167939650447649,
+        3.211104196247097,
+        3.6676381263475877,
+        5.96874814402075,
+        0.02318389977449192,
+        0.009219853859204125
+      ],
+      "weights": [
+        -0.3557895468504425,
+        0.4967459994707777,
+        0.19235655786081723,
+        -0.13483953006691451,
+        0.16640951937509896,
+        0.07296735950169694,
+        0.28793456125416217,
+        0.4767349663912519,
+        0.19728287744448753,
+        0.28577116476354275,
+        -0.15125330476675747,
+        -0.09047990045719143,
+        -0.4050706910230983,
+        0.2905558075694979,
+        -0.10726595910072569,
+        -0.20204433205585548,
+        -0.04643648820238852
+      ]
+    }
+  },
+  "forward_window": 3,
+  "gate": {
+    "WR": "last_week_points"
+  },
+  "gate_margins": {
+    "RB": {
+      "base_rate": 0.276,
+      "defers_to": null,
+      "fielded": true,
+      "mcnemar_k1": {
+        "last_week_points": {
+          "base_plus": 19,
+          "discordant": 47,
+          "model_plus": 28,
+          "significant": false,
+          "z": 1.313
+        },
+        "role_share_last": {
+          "base_plus": 9,
+          "discordant": 41,
+          "model_plus": 32,
+          "significant": true,
+          "z": 3.592
+        },
+        "snap_share_trend": {
+          "base_plus": 9,
+          "discordant": 60,
+          "model_plus": 51,
+          "significant": true,
+          "z": 5.422
+        }
+      },
+      "per_k": {
+        "1": {
+          "best_baseline": "last_week_points",
+          "best_baseline_p": 0.6514,
+          "delta": 0.058,
+          "model": 0.7094
+        },
+        "3": {
+          "best_baseline": "last_week_points",
+          "best_baseline_p": 0.5535,
+          "delta": 0.0847,
+          "model": 0.6382
+        },
+        "5": {
+          "best_baseline": "role_share_last",
+          "best_baseline_p": 0.5248,
+          "delta": 0.0701,
+          "model": 0.5949
+        }
+      }
+    },
+    "TE": {
+      "base_rate": 0.0937,
+      "defers_to": null,
+      "fielded": true,
+      "mcnemar_k1": {
+        "last_week_points": {
+          "base_plus": 10,
+          "discordant": 33,
+          "model_plus": 23,
+          "significant": true,
+          "z": 2.263
+        },
+        "role_share_last": {
+          "base_plus": 8,
+          "discordant": 28,
+          "model_plus": 20,
+          "significant": true,
+          "z": 2.268
+        },
+        "snap_share_trend": {
+          "base_plus": 7,
+          "discordant": 34,
+          "model_plus": 27,
+          "significant": true,
+          "z": 3.43
+        }
+      },
+      "per_k": {
+        "1": {
+          "best_baseline": "role_share_last",
+          "best_baseline_p": 0.1835,
+          "delta": 0.1242,
+          "model": 0.3077
+        },
+        "3": {
+          "best_baseline": "role_share_last",
+          "best_baseline_p": 0.156,
+          "delta": 0.0264,
+          "model": 0.1823
+        },
+        "5": {
+          "best_baseline": "role_share_last",
+          "best_baseline_p": 0.1376,
+          "delta": 0.0162,
+          "model": 0.1538
+        }
+      }
+    },
+    "WR": {
+      "base_rate": 0.08,
+      "defers_to": "last_week_points",
+      "fielded": false,
+      "mcnemar_k1": {
+        "last_week_points": {
+          "base_plus": 5,
+          "discordant": 12,
+          "model_plus": 7,
+          "significant": false,
+          "z": 0.577
+        },
+        "role_share_last": {
+          "base_plus": 6,
+          "discordant": 16,
+          "model_plus": 10,
+          "significant": false,
+          "z": 1.0
+        },
+        "snap_share_trend": {
+          "base_plus": 8,
+          "discordant": 21,
+          "model_plus": 13,
+          "significant": false,
+          "z": 1.091
+        }
+      },
+      "per_k": {
+        "1": {
+          "best_baseline": "last_week_points",
+          "best_baseline_p": 0.1284,
+          "delta": 0.034,
+          "model": 0.1624
+        },
+        "3": {
+          "best_baseline": "last_week_points",
+          "best_baseline_p": 0.104,
+          "delta": -0.0014,
+          "model": 0.1026
+        },
+        "5": {
+          "best_baseline": "last_week_points",
+          "best_baseline_p": 0.0844,
+          "delta": -0.0006,
+          "model": 0.0838
+        }
+      }
+    }
+  },
+  "min_forward_games": 2,
+  "model": "BreakoutModel",
+  "positions": [
+    "RB",
+    "WR",
+    "TE"
+  ],
+  "startable_rank": {
+    "RB": 30,
+    "TE": 14,
+    "WR": 30
+  },
+  "thresholds": {
+    "RB": 8.191176,
+    "TE": 8.091176,
+    "WR": 10.444118
+  }
+}
