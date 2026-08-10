@@ -39,6 +39,29 @@ did before. The model path memoises its frame+predictions per ``(grain, season, 
 re-run pays the build once. A test (`test_default_path_never_touches_the_lake`) monkeypatches
 ``build_training_frame`` to raise and asserts the default path still returns.
 
+Mixing sources: forbidden within a week, permitted across positions on the board
+--------------------------------------------------------------------------------
+The weekly path refuses a **per-row** hybrid — if the market is short, the whole call reverts to Sleeper
+rather than scoring some rows on the model and some on imputed means, because a ranking built from two
+differently-biased scores orders players by which source covered them as much as by merit. The season
+board does exactly what that argument seems to forbid: it merges Sleeper rows and model rows and sorts
+them together, and the sort is cross-position (VOR, draft order), which is the surface where comparing
+across positions *is* the product. The asymmetry is deliberate, and here is why it is not the same thing:
+
+* A **per-row** split inside one position is arbitrary — two RBs ranked against each other by different
+  scorers, with nothing but "was the line posted for his game" deciding which. There is no defensible
+  reading of the resulting order.
+* A **per-position** split is the thing Decision #3 and Decision #9 item 6 mandate: a position swaps only
+  on its own ≥ 4-live-week evidence, so a partially-swapped board is the intended steady state on the way
+  to a fully-swapped one. Refusing to compose it would mean refusing to ship the gate's own output.
+
+The cost is real and worth naming: while the board is mixed, cross-position ordering carries whatever
+level difference remains between the two sources, so a swapped position can look better or worse than it
+is *relative to* an unswapped one. That is bounded by the gate — a position only swaps after beating the
+market on both MAE and ρ, so the two are close by construction where it matters — but it is a reason to
+prefer swapping positions in a batch once several qualify, rather than one at a time mid-draft-prep.
+Within-position ordering, which is what start/sit and waivers actually turn on, is unaffected.
+
 The ensemble composes without flattening its gates
 ---------------------------------------------------
 The model source is three models with their own deferrals: :class:`model.weekly.WeeklyModel` defers
@@ -78,6 +101,10 @@ _MARKET_FEATURES: tuple[str, ...] = (
     "team_spread_line",
     "total_line",
 )
+
+#: Share of the rows being scored that must carry the **complete** market block before the model path
+#: runs. Declared, and reported when it trips. Near-total on purpose — see :func:`_market_available`.
+_MARKET_COVERAGE_FLOOR = 0.95
 
 #: The committed forward-swap gate — per-position ``met`` recorded by ``scripts/eval_swap_gate.py``.
 DEFAULT_GATE_PATH = Path(__file__).resolve().parents[1] / "model" / "fit" / "swap_gate.json"
@@ -161,6 +188,11 @@ def weekly_projections(
     positions selected for the model**, so Sleeper positions are untouched and a model position that
     degrades (next-week market features missing) falls back to its Sleeper row. ``model_provider`` is
     injectable for offline tests; the default is the real lake-backed one.
+
+    The Sleeper fetch happens on **every** call, including ``source=MODEL``: it is the base the degrade
+    falls back to, and without it a short market would leave those positions with no projection at all.
+    So there is no pure-model path here by design — the cost is one cached HTTP call, and the alternative
+    is a call that can return nothing.
     """
     srcmap = resolve_positions_source(_WEEKLY_POSITIONS, source)
     model_positions = tuple(p for p, s in srcmap.items() if s == MODEL)
@@ -248,22 +280,41 @@ def clear_model_cache() -> None:
     _SEASON_CACHE.clear()
 
 
-def _market_available(frame) -> bool:
-    """Are the week's market features actually posted? A frame with all four all-null → not yet.
+def market_coverage(frame) -> float:
+    """The share of ``frame``'s rows carrying the **complete** market block (0.0 when the column is gone).
 
-    The next-week (``week + 1``) call on a Tuesday can land before the line is posted; the model's whole
-    weekly edge is the market block, and a per-row hybrid is not a coherent ranking, so the call degrades
-    **whole** to Sleeper and this is logged (trap 2). Any week whose market is genuinely absent degrades
-    the same way — not special-cased to ``+1``.
+    Per row, not per column: a row missing any of the four is a row the model would score on imputed
+    means, which is the thing the degrade exists to prevent. An "any column has any value" test would
+    read a slate with one posted line as fully available and model the other ~399 rows blind.
     """
     import pandas as pd
 
     present = [c for c in _MARKET_FEATURES if c in frame.columns]
-    if not present:
-        return False
-    return bool(
-        any(pd.to_numeric(frame[c], errors="coerce").notna().any() for c in present)
-    )
+    if len(present) < len(_MARKET_FEATURES) or not len(frame):
+        return 0.0
+    complete = None
+    for col in present:
+        ok = pd.to_numeric(frame[col], errors="coerce").notna()
+        complete = ok if complete is None else (complete & ok)
+    return float(complete.mean())
+
+
+def _market_available(frame) -> tuple[bool, float]:
+    """``(usable, coverage)`` — is the week's market posted for the rows we are about to score?
+
+    The next-week (``week + 1``) call on a Tuesday can land before the lines are posted; the model's whole
+    weekly edge is the market block, and a per-row hybrid is not a coherent ranking, so the call degrades
+    **whole** to Sleeper and this is logged (trap 2). Any week whose market is short degrades the same way
+    — not special-cased to ``+1``.
+
+    The bar is :data:`_MARKET_COVERAGE_FLOOR`, and it is deliberately near-total rather than "some rows
+    have it". Lines post per game across a slate, so a genuinely posted week is ~100% covered and a
+    part-posted one sits far below; a floor short of that would let the *normal* Tuesday case — a handful
+    of games lined, the rest not — through, and score the unlined rows on imputed means. It is not 1.0
+    only so that a stray null cannot torpedo a fully-posted week.
+    """
+    coverage = market_coverage(frame)
+    return coverage >= _MARKET_COVERAGE_FLOOR, coverage
 
 
 def _weekly_model_scored(
@@ -290,27 +341,40 @@ def _weekly_model_scored(
 
     from dataset.assemble import build_training_frame
 
-    predict = build_training_frame([season], scoring)
-    if not predict.empty:
-        predict = predict[
-            (pd.to_numeric(predict["week"], errors="coerce") == week)
-            & predict["position"].isin(tuple(positions))
+    # ONE build over the whole span, sliced into train (< season) and predict (this week). The frame is
+    # the expensive part — minutes over the lake — and building it per-purpose would pay that two or
+    # three times per cache miss, which is exactly the cost asymmetry this module's docstring warns is
+    # what makes a seam unusable in practice.
+    span = build_training_frame(list(range(2016, season + 1)), scoring)
+    seasons_col = pd.to_numeric(span["season"], errors="coerce") if not span.empty else None
+    predict = span.iloc[0:0]
+    if seasons_col is not None:
+        predict = span[
+            (seasons_col == season)
+            & (pd.to_numeric(span["week"], errors="coerce") == week)
+            & span["position"].isin(tuple(positions))
         ].copy()
     if predict.empty:
         _LOG.info("weekly model: no lake rows for %d W%d %s — nothing to score", season, week, tuple(positions))
         _WEEKLY_CACHE[key] = {}
         return {}
-    if not _market_available(predict):
+    usable, coverage = _market_available(predict)
+    if not usable:
         _LOG.info(
-            "weekly model: (%d W%d) market features %s unavailable — degrading this call to Sleeper "
-            "for %s (a next-week call before the line is posted; a per-row hybrid is not a coherent "
-            "ranking, so the whole call reverts).",
-            season, week, _MARKET_FEATURES, tuple(positions),
+            "weekly model: (%d W%d) only %.1f%% of the %d row(s) carry the complete market block %s "
+            "(floor %.0f%%) — degrading this call to Sleeper for %s. A next-week call before the lines "
+            "are posted; scoring the uncovered rows on imputed means, or mixing them with covered ones, "
+            "is not a coherent ranking, so the whole call reverts.",
+            season, week, 100 * coverage, len(predict), _MARKET_FEATURES,
+            100 * _MARKET_COVERAGE_FLOOR, tuple(positions),
         )
         _WEEKLY_CACHE[key] = {}
         return {}
 
-    preds = _fit_predict_weekly(list(range(2016, season)), predict, scoring, tuple(positions))
+    skill_train = span[seasons_col < season] if seasons_col is not None else span.iloc[0:0]
+    preds = _fit_predict_weekly(
+        list(range(2016, season)), predict, scoring, tuple(positions), skill_train=skill_train
+    )
     players_map = sleeper.get_players_nfl()
     out: dict[str, dict] = {}
     for idx, pid in zip(predict.index, predict["player_id"].astype("string"), strict=True):
@@ -328,13 +392,17 @@ def _weekly_model_scored(
     return out
 
 
-def _fit_predict_weekly(train_seasons, predict_frame, scoring, positions):
+def _fit_predict_weekly(train_seasons, predict_frame, scoring, positions, *, skill_train=None):
     """Fit the shipped weekly models on ``train_seasons`` and predict ``predict_frame`` (each own gate).
 
     Skill (QB/RB/WR/TE) via :class:`model.weekly.WeeklyModel`, K/DST via
     :class:`model.kickdef.KickDefModel` priced with the **live** scoring. Each model predicts only its
     own positions (NaN elsewhere); ``combine_first`` merges them, so their internal deferrals survive
     into the composed prediction unflattened.
+
+    ``skill_train`` is the caller's already-built training frame for ``train_seasons``; it is reused for
+    the skill fit **and** handed to ``build_kickdef_frame`` so the K/DST frame does not rebuild it either
+    (the component labels still come from the lake). Omitted, both are built here.
     """
     import pandas as pd
 
@@ -344,13 +412,14 @@ def _fit_predict_weekly(train_seasons, predict_frame, scoring, positions):
 
     out = pd.Series(pd.NA, index=predict_frame.index, dtype="Float64")
     want = set(positions)
+    if skill_train is None:
+        skill_train = build_training_frame(train_seasons, scoring)
 
     if want & set(SKILL_POSITIONS):
-        skill_train = build_training_frame(train_seasons, scoring)
         weekly = WeeklyModel.load_fitted().fit(skill_train)
         out = out.combine_first(pd.to_numeric(weekly.predict(predict_frame), errors="coerce"))
     if want & set(KICKDEF_POSITIONS):
-        kd_train = build_kickdef_frame(train_seasons, scoring)
+        kd_train = build_kickdef_frame(train_seasons, scoring, weekly=skill_train)
         kd = KickDefModel.load_fitted(scoring=scoring).fit(kd_train)
         out = out.combine_first(pd.to_numeric(kd.predict(predict_frame), errors="coerce"))
     return {idx: (None if pd.isna(v) else float(v)) for idx, v in out.items()}

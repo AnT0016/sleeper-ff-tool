@@ -401,6 +401,7 @@ def build_kickdef_frame(
     scoring: Mapping[str, float],
     *,
     backend: StorageBackend | None = None,
+    weekly: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """The weekly K + DST frame: the training frame's features + universe, with component **labels**.
 
@@ -409,6 +410,11 @@ def build_kickdef_frame(
     engine), then used to decide which component keys to extract. This function adds the per-component
     outcome columns (``comp_*``) that the frame builder deliberately discards; it never touches the
     assembler (additive rule) and never scores anything by hand.
+
+    ``weekly`` is an already-built training frame covering ``seasons``, injectable so a caller that has
+    one does not pay for a second full build — the frame is the expensive part (minutes over the lake)
+    and :mod:`projections.source` needs the same span for the skill model. Omitted, it is built here as
+    before; the component labels are read from the lake either way.
 
     Component columns are **labels**, valid only as the target for their own week — the feature list
     (:data:`KICKDEF_FEATURES`) excludes them and the leak test pins it. Rows keep their
@@ -420,7 +426,8 @@ def build_kickdef_frame(
     from dataset.assemble import build_training_frame  # local: avoids a heavy import at module load
 
     wanted = sorted({int(s) for s in seasons})
-    weekly = build_training_frame(wanted, scoring, backend=backend)
+    if weekly is None:
+        weekly = build_training_frame(wanted, scoring, backend=backend)
     frame = weekly[weekly["position"].isin(KICKDEF_POSITIONS)].copy()
     if frame.empty:
         _LOG.warning("build_kickdef_frame: no K/DEF rows for season(s) %s", wanted)

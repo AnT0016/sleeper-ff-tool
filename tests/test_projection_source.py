@@ -162,12 +162,44 @@ def test_weekly_whole_call_degrades_to_sleeper(monkeypatch):
     assert out == weekly_projections(2026, 2, _SCORING, source=SLEEPER, sleeper=sleeper)
 
 
-def test_market_unavailable_detects_all_null_market_columns():
-    present = pd.DataFrame({"implied_team_total": [24.0, 22.0], "total_line": [45.0, 44.0]})
-    absent = pd.DataFrame({"implied_team_total": [np.nan, np.nan], "total_line": [np.nan, np.nan]})
-    assert ps._market_available(present) is True
-    assert ps._market_available(absent) is False
-    assert ps._market_available(pd.DataFrame({"x": [1]})) is False  # no market columns at all
+def _market_frame(n_complete: int, n_blank: int) -> pd.DataFrame:
+    """``n_complete`` rows carrying all four market features, ``n_blank`` rows carrying none."""
+    cols = list(ps._MARKET_FEATURES)
+    complete = pd.DataFrame({c: [24.0] * n_complete for c in cols})
+    blank = pd.DataFrame({c: [np.nan] * n_blank for c in cols})
+    return pd.concat([complete, blank], ignore_index=True)
+
+
+def test_market_coverage_is_per_row_and_needs_the_complete_block():
+    assert ps.market_coverage(_market_frame(10, 0)) == pytest.approx(1.0)
+    assert ps.market_coverage(_market_frame(0, 10)) == pytest.approx(0.0)
+    assert ps.market_coverage(_market_frame(3, 7)) == pytest.approx(0.3)
+    # A row missing ONE of the four is not covered — it would be scored on an imputed mean.
+    partial = _market_frame(1, 0)
+    partial.loc[0, "total_line"] = np.nan
+    assert ps.market_coverage(partial) == pytest.approx(0.0)
+    assert ps.market_coverage(pd.DataFrame({"x": [1]})) == pytest.approx(0.0)  # no market columns
+    assert ps.market_coverage(_market_frame(0, 0)) == pytest.approx(0.0)  # empty frame
+
+
+def test_a_part_posted_slate_degrades_rather_than_scoring_the_uncovered_rows():
+    """The normal Tuesday case — a few games lined, most not — must degrade, not model the rest blind.
+
+    This is the guard's whole point. Reverting it to "any market column has any value" (the version this
+    replaced) reads the 1-of-400 slate below as available and scores 399 rows on imputed market means.
+    """
+    usable, coverage = ps._market_available(_market_frame(1, 399))
+    assert not usable and coverage == pytest.approx(1 / 400)
+
+    usable, coverage = ps._market_available(_market_frame(400, 0))
+    assert usable and coverage == pytest.approx(1.0)
+
+    # The floor is near-total on purpose: a stray null must not torpedo a posted week...
+    usable, _ = ps._market_available(_market_frame(99, 1))
+    assert usable
+    # ...but a slate half-posted is not a posted slate.
+    usable, _ = ps._market_available(_market_frame(50, 50))
+    assert not usable
 
 
 # =============================================================== the season seam
