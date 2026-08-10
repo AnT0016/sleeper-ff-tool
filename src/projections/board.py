@@ -62,14 +62,48 @@ def build_board(
     positions: Iterable[str] = DRAFTABLE,
     adp_key: str = "adp_half_ppr",
     fetch: Callable[..., list[dict]] | None = None,
+    source: str | None = None,
 ) -> list[PlayerRow]:
     """Build the custom-scored projection board, ranked by our league scoring (best first).
 
     ``scoring`` is this league's live ``scoring_settings`` dict. ``fetch`` defaults to
     ``client.get_season_projections`` and is injectable for offline tests. Duplicate player rows
     (rare) are collapsed to the highest-scoring one.
+
+    ``source`` selects the projection source **per position** (Phase 9, #34): ``None`` (the default)
+    consults the recorded swap gate — Sleeper everywhere until a model clears the live bar — while an
+    explicit ``"sleeper"`` / ``"model"`` forces it. The simulators call ``build_board(season, scoring)``
+    unchanged and stay on Sleeper today; when a position's gate flips, the seam composes the model board
+    for that position. The Sleeper path below is untouched, and no lake module is imported unless the
+    model source is actually selected (:mod:`projections.source`).
     """
     positions = tuple(positions)
+    # Lazy: projections.source imports this module, so importing it at load would cycle. It is lake-free,
+    # and its resolution reads only the (cached) gate file — the Sleeper default never touches the lake.
+    from projections.source import MODEL, compose_season_board, resolve_positions_source
+
+    srcmap = resolve_positions_source(positions, source)
+    if any(s == MODEL for s in srcmap.values()):
+        return compose_season_board(
+            season, scoring, positions=positions, srcmap=srcmap, adp_key=adp_key, fetch=fetch,
+            sleeper_builder=_sleeper_board,
+        )
+    return _sleeper_board(season, scoring, positions=positions, adp_key=adp_key, fetch=fetch)
+
+
+def _sleeper_board(
+    season: int,
+    scoring: Mapping[str, float],
+    *,
+    positions: tuple[str, ...],
+    adp_key: str = "adp_half_ppr",
+    fetch: Callable[..., list[dict]] | None = None,
+) -> list[PlayerRow]:
+    """The Sleeper season board: fetch, re-score in our settings, collapse duplicates, rank best-first.
+
+    Extracted verbatim from the old ``build_board`` body so :mod:`projections.source` composes a mixed
+    board by calling it for the Sleeper positions — one scoring loop, never re-implemented.
+    """
     get = fetch or client.get_season_projections
     by_id: dict[str, PlayerRow] = {}
     for r in get(season, positions=positions):

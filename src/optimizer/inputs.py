@@ -27,6 +27,7 @@ import polars as pl
 
 from data import nflverse
 from optimizer.lineup import LineupPlayer, lineup_slots
+from projections.source import weekly_projections
 from scoring.engine import points
 from sleeper import client
 
@@ -199,15 +200,21 @@ def load_lineup_inputs(
     *,
     sleeper=client,
     fetch_schedules: Callable[[int], pl.DataFrame] = nflverse.load_schedules,
+    source: str | None = None,
 ) -> LineupInputs:
-    """Fetch + join everything the optimizer needs for one week (live, cached). Read-only."""
+    """Fetch + join everything the optimizer needs for one week (live, cached). Read-only.
+
+    ``source`` selects the projection source (Phase 9, #34): ``None`` (the default) is Sleeper per the
+    recorded swap gate; ``"model"`` opts a position into our own model where it exists. The seam returns
+    the same ``score_projections`` shape, so nothing downstream changes.
+    """
     league = sleeper.get_league(league_id)
     scoring = league["scoring_settings"]
     slots = lineup_slots(league.get("roster_positions") or [])
 
     roster = find_my_roster(sleeper.get_rosters(league_id), user_id)
     players_map = sleeper.get_players_nfl()
-    scored = score_projections(sleeper.get_projections(season, week), scoring)
+    scored = weekly_projections(season, week, scoring, source=source, sleeper=sleeper)
     byes = bye_teams(season, week, fetch_schedules=fetch_schedules)
 
     players, unjoined = assemble_players(roster, players_map, scored, byes)

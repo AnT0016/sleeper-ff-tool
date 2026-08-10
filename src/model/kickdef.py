@@ -401,6 +401,7 @@ def build_kickdef_frame(
     scoring: Mapping[str, float],
     *,
     backend: StorageBackend | None = None,
+    weekly: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """The weekly K + DST frame: the training frame's features + universe, with component **labels**.
 
@@ -409,6 +410,11 @@ def build_kickdef_frame(
     engine), then used to decide which component keys to extract. This function adds the per-component
     outcome columns (``comp_*``) that the frame builder deliberately discards; it never touches the
     assembler (additive rule) and never scores anything by hand.
+
+    ``weekly`` is an already-built training frame covering ``seasons``, injectable so a caller that has
+    one does not pay for a second full build — the frame is the expensive part (minutes over the lake)
+    and :mod:`projections.source` needs the same span for the skill model. Omitted, it is built here as
+    before; the component labels are read from the lake either way.
 
     Component columns are **labels**, valid only as the target for their own week — the feature list
     (:data:`KICKDEF_FEATURES`) excludes them and the leak test pins it. Rows keep their
@@ -420,7 +426,8 @@ def build_kickdef_frame(
     from dataset.assemble import build_training_frame  # local: avoids a heavy import at module load
 
     wanted = sorted({int(s) for s in seasons})
-    weekly = build_training_frame(wanted, scoring, backend=backend)
+    if weekly is None:
+        weekly = build_training_frame(wanted, scoring, backend=backend)
     frame = weekly[weekly["position"].isin(KICKDEF_POSITIONS)].copy()
     if frame.empty:
         _LOG.warning("build_kickdef_frame: no K/DEF rows for season(s) %s", wanted)
@@ -861,6 +868,34 @@ def recorded_gate(path: str | Path = DEFAULT_ARTIFACT_PATH) -> tuple[str, ...]:
         return tuple(cell_key(p, cold) for p in KICKDEF_POSITIONS for cold in (False, True))
 
 
+def _scoring_diff(recorded: Mapping[str, float], live: Mapping[str, float]) -> dict[str, tuple]:
+    """Scoring keys whose coefficient differs between the artifact's fit-time scoring and the live one."""
+    out: dict[str, tuple] = {}
+    for key in sorted(set(recorded) | set(live)):
+        r = float(recorded.get(key, 0.0) or 0.0)
+        v = float(live.get(key, 0.0) or 0.0)
+        if r != v:
+            out[key] = (r, v)
+    return out
+
+
+def _log_scoring_override(recorded: Mapping[str, float], live: Mapping[str, float], path) -> None:
+    """Log how the live scoring differs from the artifact's recorded scoring — the seam made visible."""
+    diff = _scoring_diff(recorded, live)
+    if not diff:
+        _LOG.info(
+            "KickDefModel.load_fitted: live scoring matches the artifact's recorded scoring "
+            "(%d keys) — no re-price.", len(live),
+        )
+        return
+    _LOG.warning(
+        "KickDefModel.load_fitted: live scoring differs from the fit-time scoring recorded in %s at "
+        "%d key(s) %s — K/DST components will be re-priced with the live scoring (the intended seam; "
+        "confirm the change is expected, e.g. a real 2026 league id replacing the sandbox).",
+        path, len(diff), {k: f"{r}->{v}" for k, (r, v) in diff.items()},
+    )
+
+
 class KickDefModel:
     """The **shipped** K + DST model: component heads through the engine, per-cell measured deferral.
 
@@ -938,6 +973,23 @@ class KickDefModel:
                     out.iloc[idx] = head.predict(frame.iloc[idx])
         return out
 
+    # ----------------------------------------------------------------- scoring seam
+    def _apply_scoring(self, scoring: Mapping[str, float]) -> None:
+        """Point the model **and both heads** at one scoring dict — collapse the three copies.
+
+        ``__init__`` / ``from_dict`` build the model, the kicker head and the defence head each with
+        their own ``dict(scoring)``; three copies of one dict is the footgun this ticket (#34) exists to
+        remove — the mechanism re-prices components through the engine, but only if every copy is the
+        same dict. This makes them share **one** reference, so overriding the live scoring on
+        :meth:`load_fitted` re-prices K and DST together and cannot leave a head on stale coefficients.
+        """
+        shared = dict(scoring)
+        self.scoring = shared
+        if self._kicker is not None:
+            self._kicker.scoring = shared
+        if self._defense is not None:
+            self._defense.scoring = shared
+
     # ----------------------------------------------------------------- serialisation
     def to_dict(self) -> dict:
         return {
@@ -969,6 +1021,7 @@ class KickDefModel:
             model._kicker = _KickerHead.from_dict(payload["kicker"], scoring)
         if payload.get("defense"):
             model._defense = _DefenseHead.from_dict(payload["defense"], scoring)
+        model._apply_scoring(scoring)  # collapse the three copies to one shared reference
         return model
 
     def save(self, path: str | Path) -> None:
@@ -981,15 +1034,32 @@ class KickDefModel:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
     @classmethod
-    def load_fitted(cls, path: str | Path = DEFAULT_ARTIFACT_PATH) -> KickDefModel:
+    def load_fitted(
+        cls,
+        path: str | Path = DEFAULT_ARTIFACT_PATH,
+        scoring: Mapping[str, float] | None = None,
+    ) -> KickDefModel:
         """Load the committed artifact into a correctly-configured model: heads **and** the measured gate.
 
         The runtime path from generated artifact to working model (what #34 loads). The component heads
         are reconstructed (warm rows predict immediately) and ``defer`` is the gate the artifact records.
         The deferral baseline is a cheap group mean re-fit from live data, so it is **not** stored; call
         ``.fit(frame)`` with recent data before predicting deferred rows (``predict`` raises otherwise).
+
+        Pass ``scoring`` to price components with the **live** ``scoring_settings`` instead of whatever was
+        recorded at fit time — the seam this module's headline ("a mid-season scoring change re-prices with
+        no retraining") is about, and the one that matters when ``LEAGUE_ID`` swaps off the 2026 sandbox:
+        without it a load prices the real league's games with the sandbox's 42 keys and nothing warns. The
+        override replaces the model's **and both heads'** copies (via :meth:`_apply_scoring`), and a
+        difference against the artifact's recorded scoring is logged so the re-price is visible, never
+        silent. ``scoring=None`` keeps the recorded scoring (backward-compatible).
         """
-        return cls.load(path)
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        model = cls.from_dict(payload)
+        if scoring is not None:
+            _log_scoring_override(dict(payload.get("scoring", {})), scoring, path)
+            model._apply_scoring(scoring)
+        return model
 
 
 # =============================================================== evaluation convenience

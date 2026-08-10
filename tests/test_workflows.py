@@ -223,6 +223,24 @@ def test_the_capture_workflows_do_not_share_the_dashboard_refresh_group():
     ]["group"]
 
 
+# --------------------------------------------------------------------------- the swap gate is human-only
+def test_no_cron_regenerates_the_swap_gate():
+    """The #34 default-source swap must stay a deliberate human act — no workflow regenerates it.
+
+    ``projections.source.default_source`` reads ``src/model/fit/swap_gate.json``; regenerating it flips
+    the default projection source for every surface in the tool. Its safety rests entirely on "committing
+    the new state is a deliberate human act". ``refresh.yml`` is already a cron that commits data back to
+    the repo, so that assumption is one workflow edit away from being false: adding ``eval_swap_gate.py``
+    to any workflow would swap the tool's projections with no human in the loop. Pinned across **every**
+    workflow (not only the two capture crons), the companion to
+    ``test_nothing_is_committed_back_to_the_repo``.
+    """
+    for yml in WORKFLOWS.glob("*.yml"):
+        text = yml.read_text(encoding="utf-8")
+        assert "eval_swap_gate" not in text, f"{yml.name} regenerates the swap gate — it must be human-only"
+        assert "swap_gate.json" not in text, f"{yml.name} writes the swap-gate artifact — it must be human-only"
+
+
 # --------------------------------------------------------------------------- shared job shape
 @pytest.mark.parametrize("name", CAPTURE)
 def test_each_job_declares_a_timeout_and_installs_the_package_the_way_the_suite_does(name):
