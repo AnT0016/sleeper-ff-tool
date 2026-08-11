@@ -583,11 +583,17 @@ def latest_completed_week(schedules: pl.DataFrame | None, now: datetime) -> int 
 # --------------------------------------------------------------------------- CLI helpers
 @dataclass(frozen=True)
 class RunPlan:
-    """What a scheduled run resolved to: the season/week to capture, or why it should no-op."""
+    """What a scheduled run resolved to: the season/week to capture, or why it should no-op.
+
+    ``sources`` narrows the capture to a subset of the cadence's registry entries (``None`` = all of
+    them). It is set for a **pre-season prelock** run, which takes only the forward-only sources —
+    see :func:`plan_run`.
+    """
 
     season: int
     week: int
     skip: str | None = None
+    sources: tuple[str, ...] | None = None
 
 
 def plan_run(
@@ -638,6 +644,15 @@ def plan_run(
 
     reason = offseason_skip_reason(state, week, season)
     if reason is not None:
+        forward = _preseason_prelock_sources(state, mode, resolved_season)
+        if forward is not None:
+            _LOG.info(
+                "prelock plan: season %s week %s — pre-season, so capturing only the forward-only "
+                "source(s) %s (Sleeper already publishes the regular season's week-%s projections and "
+                "serves only their latest values; the backfillable sources wait for kickoff)",
+                resolved_season, fallback_week, list(forward), fallback_week,
+            )
+            return RunPlan(resolved_season, fallback_week, None, sources=forward)
         # Off-season: return before any schedule work — next season's schedule may not exist yet.
         return RunPlan(resolved_season, fallback_week, reason)
     if resolved_season <= 0:
@@ -768,6 +783,44 @@ def _is_forward_only(source: str) -> bool:
     """Is a lost capture of ``source`` lost *for good*? (An unregistered name is not.)"""
     entry = SOURCES.get(source)
     return entry is not None and not entry.backfillable
+
+
+#: The one season type where the off-season skip is **wrong for a prelock capture**. Sleeper publishes
+#: the regular season's week-1 projections weeks before it flips ``state.season_type`` from ``pre`` to
+#: ``regular`` — measured: 3,301 rows with full stat lines on 2026-08-10, while the cron was skipping.
+_PRESEASON = "pre"
+
+
+def _preseason_prelock_sources(
+    state: Mapping, mode: str, resolved_season: int
+) -> tuple[str, ...] | None:
+    """The forward-only sources a **pre-season prelock** run must still take, or ``None`` to skip.
+
+    ``analysis.snapshot.offseason_skip_reason`` answers "should the dashboard publish a snapshot?" and
+    its answer is right for that: with no games played there is nothing to refresh. A *capture* asks a
+    different question — "is there anything here that will not exist tomorrow?" — and in the pre-season
+    the answer is yes. Sleeper's projection endpoints serve **only the latest values**, so the pre-lock
+    value for a week is gone the moment that week kicks off, and ``state.season_type`` is still ``pre``
+    up to the start of the regular season. Reusing the publish predicate here therefore risks the exact
+    loss the whole forward-only design exists to prevent: if the flip to ``regular`` lands after the
+    Thursday cron of week 1, week 1's pre-lock projections are lost for good and the swap gate
+    (Decision #3) starts a week late.
+
+    So a pre-season prelock run proceeds — narrowed to the sources that **cannot be backfilled**. The
+    rest (nflverse, whose pre-season parquet 404s anyway) are recoverable by definition and wait for
+    kickoff, which keeps the run's summary free of failures that mean nothing. Capturing early is
+    otherwise harmless: dedup is per capture date, and the assembler resolves as-of, so the extra
+    captures are a revision stream rather than contamination.
+
+    Returns ``None`` for anything but a pre-season prelock run with a usable season — the true
+    off-season (``off``/``post``) still skips outright.
+    """
+    if mode != "prelock" or resolved_season <= 0:
+        return None
+    if str((state or {}).get("season_type") or "") != _PRESEASON:
+        return None
+    forward = tuple(s.name for s in sources_for_cadence("prelock") if not s.backfillable)
+    return forward or None
 
 
 def exit_code(results: Sequence[CaptureResult]) -> int:
