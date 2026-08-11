@@ -92,11 +92,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     captured_at = now.isoformat()
+    scope = "" if plan.sources is None else f", forward-only sources {list(plan.sources)}"
     print(
         f"{args.mode} capture — {plan.season} Week {plan.week} "
-        f"(captured_at {captured_at}, backend {LAKE_BACKEND})"
+        f"(captured_at {captured_at}, backend {LAKE_BACKEND}{scope})"
     )
-    results = runner.run_cadence(args.mode, plan.season, plan.week, captured_at=captured_at, ctx=ctx)
+    results = runner.run_cadence(
+        args.mode, plan.season, plan.week, captured_at=captured_at, sources=plan.sources, ctx=ctx
+    )
     print(runner.format_summary(results))
     return runner.exit_code(results)
 

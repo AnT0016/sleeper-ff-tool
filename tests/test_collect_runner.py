@@ -597,9 +597,42 @@ def test_plan_run_reads_the_season_and_week_from_sleeper():
     assert (plan.season, plan.week, plan.skip) == (2026, 4, None)
 
 
-def test_plan_run_skips_outside_the_regular_season():
-    plan = runner.plan_run({"season": "2026", "season_type": "pre", "week": 0})
+@pytest.mark.parametrize("season_type", ["off", "post"])
+def test_plan_run_skips_outside_the_regular_season(season_type):
+    plan = runner.plan_run({"season": "2026", "season_type": season_type, "week": 0})
     assert plan.skip and "off-season" in plan.skip
+
+
+def test_a_preseason_prelock_still_captures_the_forward_only_sources():
+    """The pre-season is not the off-season for a *capture*: the projections are already published.
+
+    Sleeper serves only the latest projection values, and ``season_type`` stays ``pre`` up to the start
+    of the regular season — so reusing the publish-time off-season skip here risks losing week 1's
+    pre-lock projections for good if the flip to ``regular`` lands after week 1's Thursday cron.
+    Reverting ``_preseason_prelock_sources`` to ``None`` makes this run skip, and this test fails.
+    """
+    plan = runner.plan_run({"season": "2026", "season_type": "pre", "week": 1})
+    assert plan.skip is None
+    assert plan.season == 2026 and plan.week == 1
+    # Narrowed to exactly the sources a missed capture would lose for good.
+    assert plan.sources is not None
+    assert set(plan.sources) == {
+        s.name for s in sources_for_cadence("prelock") if not s.backfillable
+    }
+    assert plan.sources, "the prelock cadence must carry at least one forward-only source"
+    # ...and nothing that a backfill could recover later.
+    assert not any(SOURCES[n].backfillable for n in plan.sources)
+
+
+def test_a_preseason_postgame_run_still_skips():
+    """Every postgame source is backfillable, so there is nothing unrecoverable to rescue."""
+    plan = runner.plan_run({"season": "2026", "season_type": "pre", "week": 1}, mode="postgame")
+    assert plan.skip and "off-season" in plan.skip
+
+
+def test_a_regular_season_prelock_is_not_narrowed():
+    plan = runner.plan_run({"season": "2026", "season_type": "regular", "week": 3})
+    assert plan.skip is None and plan.sources is None  # None = every source for the cadence
 
 
 def test_an_explicit_season_and_week_always_run():
@@ -858,11 +891,32 @@ def test_collect_cli_no_ops_in_the_off_season(offline, lake, monkeypatch, capsys
     """Exit 0 and write nothing, so the cron stays green until the season starts."""
     cli = _load_cli("collect")
     monkeypatch.setattr(
-        cli.client, "get_state", lambda *a, **k: {"season": "2026", "season_type": "pre", "week": 0}
+        cli.client, "get_state", lambda *a, **k: {"season": "2026", "season_type": "off", "week": 0}
     )
     assert cli.main(["--mode", "prelock"]) == 0
     assert _partitions(lake) == []
     assert "Skipping" in capsys.readouterr().out
+
+
+def test_collect_cli_captures_only_the_forward_only_sources_in_the_preseason(
+    offline, lake, monkeypatch, capsys
+):
+    """The pre-season prelock writes the unrecoverable rows and nothing else.
+
+    Green, narrow, and the partitions it wrote are exactly the forward-only ones — so a week-1 capture
+    can never be lost to ``season_type`` still reading ``pre`` on week 1's Thursday.
+    """
+    cli = _load_cli("collect")
+    monkeypatch.setattr(
+        cli.client, "get_state", lambda *a, **k: {"season": "2026", "season_type": "pre", "week": 1}
+    )
+    assert cli.main(["--mode", "prelock"]) == 0
+    written = {p.split("/")[0] for p in _partitions(lake)}  # _partitions returns posix paths
+    forward = {s.name for s in sources_for_cadence("prelock") if not s.backfillable}
+    assert written, "the pre-season capture must write something — that is the point of the fix"
+    assert written <= forward, f"a backfillable source was captured in the pre-season: {written - forward}"
+    out = capsys.readouterr().out
+    assert "Skipping" not in out and "forward-only sources" in out
 
 
 def test_collect_cli_aborts_rather_than_guess_the_week(offline, lake, monkeypatch):
