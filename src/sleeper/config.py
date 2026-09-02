@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import os
 
-#: 2026 "Test league" — a sandbox copy of the 2025 league (same scoring/roster/waiver settings),
-#: created while waiting for the real 2026 redraft league. Replace with the real league id once
-#: the league is recreated for 2026.
+#: 2026 "Fantasy Campechano" — the real active redraft league.
+LEAGUE_ID_2026: str = "1389374818041724928"
+#: 2026 "Test league" — retained as a sandbox copy of the real settings for rehearsals.
 LEAGUE_ID_2026_TEST: str = "1378062197778833408"
 #: "Fantasy Campechano" 2025 — completed; the scoring source of truth and validation data source
 #: (it has full reported matchup points).
@@ -25,8 +25,8 @@ LEAGUE_ID_2025: str = "1257071615817043968"
 #: 2024 season league — completed.
 LEAGUE_ID_2024: str = "1124851086289559552"
 
-#: The ACTIVE league (drives every tool). Currently the 2026 test league.
-LEAGUE_ID: str = os.environ.get("SLEEPER_LEAGUE_ID", LEAGUE_ID_2026_TEST)
+#: The ACTIVE league (drives every tool).
+LEAGUE_ID: str = os.environ.get("SLEEPER_LEAGUE_ID", LEAGUE_ID_2026)
 #: The most recent COMPLETED league (backtests / validation).
 PREVIOUS_LEAGUE_ID: str = os.environ.get("SLEEPER_PREVIOUS_LEAGUE_ID", LEAGUE_ID_2025)
 
