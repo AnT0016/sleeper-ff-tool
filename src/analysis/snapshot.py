@@ -340,6 +340,11 @@ def build_snapshot(
         }
         for a in w.handcuffs
     ]
+    # K/DEF are streamed through the dedicated thresholded view below.  Sending them through the
+    # generic reverse-priority logic turns trivial 0.4-point edges into misleading "spend" calls.
+    skill_spend_candidates = [
+        candidate for candidate in w.spend_candidates if candidate.player.pos not in {"K", "DEF"}
+    ]
     spend_rows = [
         {
             "verdict": a.verdict,
@@ -356,7 +361,7 @@ def build_snapshot(
             "drop_pos": drop_pos,
             "drop_cost": drop_cost,
         }
-        for a in spend_advice(w.spend_candidates, w.my_players, w.slots, w.scarcity)
+        for a in spend_advice(skill_spend_candidates, w.my_players, w.slots, w.scarcity)
     ]
     stashes = rank_playoff_stashes(
         w.stash_candidates, w.sos, w.opponents_by_week, playoff_weeks=playoff_weeks
