@@ -45,10 +45,11 @@ def test_merge_sos_combines_positions_per_team():
 
 
 # --------------------------------------------------------------------------- streaming ranker
-def _cand(pid, pos, this_week, *, next_week=0.0, ros=0.0, playoff=0.0, team="X"):
+def _cand(pid, pos, this_week, *, next_week=0.0, next_3_avg=0.0, ros=0.0, playoff=0.0, team="X"):
     return {
         "player_id": pid, "name": pid, "pos": pos, "team": team,
-        "this_week": this_week, "next_week": next_week, "ros_pg": ros, "playoff": playoff,
+        "this_week": this_week, "next_week": next_week, "next_3_avg": next_3_avg,
+        "ros_pg": ros, "playoff": playoff,
     }
 
 

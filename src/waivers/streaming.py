@@ -35,6 +35,7 @@ class StreamOption:
     team: str | None
     this_week: float  # this week's re-scored projection (the decision variable)
     next_week: float  # next week's re-scored projection (hold-vs-churn signal)
+    next_3_avg: float  # this week plus the next two, per-game average
     ros_pg: float  # rest-of-season per-game level (season projection ÷ games)
     playoff: float  # Weeks 15-17 outlook (DEF: SOS-tilted; K: flat per-game)
     gain: float  # this_week minus my current starter's this_week
@@ -64,7 +65,7 @@ def rank_streamers(
     """Rank free-agent streamers per position by this week's value, best first.
 
     ``candidates`` are free-agent mappings with ``player_id``/``name``/``pos``/``team`` and the
-    precomputed horizon values ``this_week``/``next_week``/``ros_pg``/``playoff``. ``current_by_pos``
+    precomputed horizon values ``this_week``/``next_week``/``next_3_avg``/``ros_pg``/``playoff``. ``current_by_pos``
     maps a position to my currently-rostered starter there (``{"name", "this_week"}``) — the player a
     pickup would replace. Returns one :class:`StreamAdvice` per position (in ``positions`` order) that
     has any candidate or a current starter.
@@ -89,6 +90,7 @@ def rank_streamers(
                 team=c.get("team"),
                 this_week=round(float(c.get("this_week") or 0.0), 2),
                 next_week=round(float(c.get("next_week") or 0.0), 2),
+                next_3_avg=round(float(c.get("next_3_avg") or 0.0), 2),
                 ros_pg=round(float(c.get("ros_pg") or 0.0), 2),
                 playoff=round(float(c.get("playoff") or 0.0), 2),
                 gain=round(float(c.get("this_week") or 0.0) - cur_tw, 2),

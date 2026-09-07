@@ -76,6 +76,25 @@ def _usage_str(usage: Mapping, pid: str) -> str:
     return sig.summary() if sig else ""
 
 
+def _suggested_drop(players: Sequence[LineupPlayer], slots) -> tuple[str, str, float]:
+    """Bench player whose removal hurts this week's optimized lineup the least.
+
+    This is a *drop candidate*, not a rest-of-season verdict. K and DEF remain excluded because
+    they are active weekly starters and are normally churned only for a meaningful streamer edge.
+    """
+    solution = optimize(players, slots)
+    bench = [p for p in solution.bench if p.pos not in {"K", "DEF"}]
+    if not bench:
+        return "", "", 0.0
+    options = []
+    for player in bench:
+        remaining = [p for p in players if p.player_id != player.player_id]
+        loss = round(solution.total - optimize(remaining, slots).total, 2)
+        options.append((loss, player.proj_pts, player.name, player.pos))
+    loss, _, name, pos = min(options, key=lambda row: (row[0], row[1], row[2]))
+    return name, pos, loss
+
+
 #: nflverse uses a couple of abbreviations that differ from Sleeper's; normalize to Sleeper's.
 _NFLVERSE_TO_SLEEPER: dict[str, str] = {"LA": "LAR"}
 
@@ -303,6 +322,7 @@ def build_snapshot(
 
     # --- Phase 4: waivers / stash / handcuffs --------------------------------------------------
     w = load_waiver_inputs(league_id, user_id, season, week, sleeper=sleeper)
+    drop_name, drop_pos, drop_cost = _suggested_drop(w.my_players, w.slots)
     handcuff_rows = [
         {
             "priority": a.priority,
@@ -314,6 +334,9 @@ def build_snapshot(
             "gap": a.gap,
             "reason": a.reason,
             "usage": _usage_str(w.usage, a.backup_id),
+            "drop_name": drop_name,
+            "drop_pos": drop_pos,
+            "drop_cost": drop_cost,
         }
         for a in w.handcuffs
     ]
@@ -329,6 +352,9 @@ def build_snapshot(
             "is_new_starter": a.is_new_starter,
             "reason": a.reason,
             "usage": _usage_str(w.usage, a.player_id),
+            "drop_name": drop_name,
+            "drop_pos": drop_pos,
+            "drop_cost": drop_cost,
         }
         for a in spend_advice(w.spend_candidates, w.my_players, w.slots, w.scarcity)
     ]
@@ -370,6 +396,7 @@ def build_snapshot(
             "this_week": o.this_week,
             "gain": o.gain,
             "next_week": o.next_week,
+            "next_3_avg": o.next_3_avg,
             "ros_pg": o.ros_pg,
             "playoff": o.playoff,
         }

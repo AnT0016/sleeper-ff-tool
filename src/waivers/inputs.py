@@ -88,13 +88,14 @@ _SEASON_GAMES = 17
 def _stream_candidates(
     scored: Mapping[str, Mapping],
     next_scored: Mapping[str, Mapping],
+    next2_scored: Mapping[str, Mapping],
     season_scored: Mapping[str, Mapping],
     fa_ids: set,
     players_map: Mapping[str, Mapping],
     sos: Mapping[str, Mapping[str, float]],
     opp_by_week: Mapping[str, Mapping[int, str]],
 ) -> list[dict]:
-    """Free-agent K/DEF with their streaming horizon values (this week / next / ROS / playoffs)."""
+    """Free-agent K/DEF with this-week, short-run, ROS, and playoff horizon values."""
     out: list[dict] = []
     for pid, row in scored.items():
         pos = row.get("pos")
@@ -103,6 +104,7 @@ def _stream_candidates(
         team = pid if pos == "DEF" else (players_map.get(pid, {}).get("team") or row.get("team"))
         this_week = float(row.get("proj") or 0.0)
         next_week = float((next_scored.get(pid) or {}).get("proj") or 0.0)
+        next2_week = float((next2_scored.get(pid) or {}).get("proj") or 0.0)
         season_proj = float((season_scored.get(pid) or {}).get("proj") or 0.0)
         ros_pg = season_proj / _SEASON_GAMES if season_proj else this_week
         sched = opp_by_week.get(team or "", {})
@@ -120,6 +122,7 @@ def _stream_candidates(
                 "team": team,
                 "this_week": round(this_week, 2),
                 "next_week": round(next_week, 2),
+                "next_3_avg": round((this_week + next_week + next2_week) / 3, 2),
                 "ros_pg": round(ros_pg, 2),
                 "playoff": round(playoff, 2),
             }
@@ -357,11 +360,12 @@ def load_waiver_inputs(
             )
     sos = merge_sos(sos, def_sos_multipliers(points_allowed_to_def(dst_rows, all_opp)))
 
-    # K/DEF streaming horizons: this week + next week (real weekly projections), a rest-of-season
-    # per-game level (season projection ÷ games), and a Weeks 15-17 outlook (DEF SOS-tilted, K flat).
+    # K/DEF horizons: this week, next week, and a three-week average (real weekly projections),
+    # plus rest-of-season per-game and a Weeks 15-17 outlook.
     next_scored = weekly_projections(season, week + 1, scoring, source=source, sleeper=sleeper)
+    next2_scored = weekly_projections(season, week + 2, scoring, source=source, sleeper=sleeper)
     stream_candidates = _stream_candidates(
-        scored, next_scored, season_scored, fa_ids, players_map, sos, opp_by_week
+        scored, next_scored, next2_scored, season_scored, fa_ids, players_map, sos, opp_by_week
     )
     stream_current = {
         sp.pos: {"name": sp.name, "this_week": sp.proj_pts}

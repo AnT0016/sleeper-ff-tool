@@ -282,7 +282,7 @@ with tab_waiver:
     st.subheader("🎯 Weekly K/DEF streaming — best available this week")
     st.caption(
         "Ranked by THIS week's projection in our scoring. Δ = edge over your current starter. "
-        "The next / ROS·g / playoff columns show the run ahead — the DEF *playoff* column is tilted by "
+        "The next / 3-wk avg / ROS·g / playoff columns show the run ahead — the DEF *playoff* column is tilted by "
         "our DEF strength-of-schedule; K carries no SOS (a kicker's output rides its own offense)."
     )
     streamers = load_table("streamers", mt)
@@ -300,9 +300,9 @@ with tab_waiver:
             st.markdown(f"**{pos}** — {badge} · current starter: {cur} ({cur_tw:.1f} proj)")
             view = grp.rename(columns={
                 "name": "player", "this_week": "this wk", "next_week": "next wk",
-                "ros_pg": "ROS·g", "playoff": "playoff",
+                "next_3_avg": "3-wk avg", "ros_pg": "ROS·g", "playoff": "playoff",
             })
-            show(view[["player", "team", "this wk", "gain", "next wk", "ROS·g", "playoff"]])
+            show(view[["player", "team", "this wk", "gain", "next wk", "3-wk avg", "ROS·g", "playoff"]])
 
     st.divider()
 
@@ -313,7 +313,11 @@ with tab_waiver:
     else:
         hc = hc.copy()
         hc["priority"] = hc["priority"].map(lambda p: "🚨 URGENT" if p == "URGENT" else "🔶 HIGH")
-        show(hc[["priority", "backup_name", "pos", "team", "reason", "usage"]])
+        hc["drop"] = hc.apply(
+            lambda r: f"{r['drop_name']} ({r['drop_pos']})" if r["drop_name"] else "no clean drop",
+            axis=1,
+        )
+        show(hc[["priority", "backup_name", "pos", "team", "drop", "drop_cost", "reason", "usage"]])
 
     st.subheader("Reverse-priority spend advice")
     st.caption("No FAAB — spend a single ordered claim only on real upgrades or new starters.")
@@ -321,8 +325,12 @@ with tab_waiver:
     if not spend.empty:
         spend = spend.copy()
         spend["verdict"] = spend["verdict"].map(lambda v: _SPEND_BADGE.get(v, v))
+        spend["drop"] = spend.apply(
+            lambda r: f"{r['drop_name']} ({r['drop_pos']})" if r["drop_name"] else "no clean drop",
+            axis=1,
+        )
         show(
-            spend[["verdict", "name", "pos", "team", "lineup_gain", "contention_level", "reason", "usage"]]
+            spend[["verdict", "name", "pos", "team", "lineup_gain", "drop", "drop_cost", "contention_level", "reason", "usage"]]
         )
     else:
         show(spend)
