@@ -358,10 +358,16 @@ def build_snapshot(
         }
         for a in handcuff_alerts
     ]
-    # K/DEF are streamed through the dedicated thresholded view below.  Sending them through the
+    # K/DEF are streamed through the dedicated thresholded view below. Sending them through the
     # generic reverse-priority logic turns trivial 0.4-point edges into misleading "spend" calls.
+    # In a one-QB, non-superflex league, a healthy starting QB is not a reason to burn a bench slot
+    # on a backup; use the waiver view for RB/WR/TE additions and stream the QB only at bye/injury.
+    one_qb = int(w.slots.get("QB", 0)) == 1 and int(w.slots.get("SUPER_FLEX", 0)) == 0
+    healthy_qb = any(p.pos == "QB" and p.eligible and p.proj_pts > 0 for p in w.my_players)
     skill_spend_candidates = [
-        candidate for candidate in w.spend_candidates if candidate.player.pos not in {"K", "DEF"}
+        candidate for candidate in w.spend_candidates
+        if candidate.player.pos not in {"K", "DEF"}
+        and not (one_qb and healthy_qb and candidate.player.pos == "QB")
     ]
     spend_rows = [
         {
