@@ -83,7 +83,12 @@ def _suggested_drop(players: Sequence[LineupPlayer], slots) -> tuple[str, str, f
     they are active weekly starters and are normally churned only for a meaningful streamer edge.
     """
     solution = optimize(players, slots)
-    bench = [p for p in solution.bench if p.pos not in {"K", "DEF"}]
+    # Never offer an injured / inactive player as a cut. Their week-one projection may be zero,
+    # but that says nothing about their value once healthy (for example, a short-term Bowers injury).
+    bench = [
+        p for p in solution.bench
+        if p.pos not in {"K", "DEF"} and not p.status and p.proj_pts > 0
+    ]
     if not bench:
         return "", "", 0.0
     options = []
@@ -323,6 +328,19 @@ def build_snapshot(
     # --- Phase 4: waivers / stash / handcuffs --------------------------------------------------
     w = load_waiver_inputs(league_id, user_id, season, week, sleeper=sleeper)
     drop_name, drop_pos, drop_cost = _suggested_drop(w.my_players, w.slots)
+    # Do not recommend a second short-term replacement when the optimized lineup already has a
+    # healthy player filling the injured starter's position.  The handcuff detector knows who is
+    # next on a depth chart, but not whether the fantasy roster already has adequate cover.
+    handcuff_alerts = [
+        a for a in w.handcuffs
+        if not (
+            a.priority == "URGENT"
+            and any(
+                sp.player.pos == a.pos and str(sp.player.player_id) != a.starter_id
+                for sp in sol.starters
+            )
+        )
+    ]
     handcuff_rows = [
         {
             "priority": a.priority,
@@ -338,7 +356,7 @@ def build_snapshot(
             "drop_pos": drop_pos,
             "drop_cost": drop_cost,
         }
-        for a in w.handcuffs
+        for a in handcuff_alerts
     ]
     # K/DEF are streamed through the dedicated thresholded view below.  Sending them through the
     # generic reverse-priority logic turns trivial 0.4-point edges into misleading "spend" calls.
